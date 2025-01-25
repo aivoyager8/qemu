@@ -1295,6 +1295,8 @@ if not get_option('rbd').auto() or have_block
   endif
 endif
 
+dfs = declare_dependency(dependencies: [libdfs, libdaos])
+
 glusterfs = not_found
 glusterfs_ftruncate_has_stat = false
 glusterfs_iocb_has_stat = false
