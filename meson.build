@@ -1295,7 +1295,10 @@ if not get_option('rbd').auto() or have_block
   endif
 endif
 
-dfs = declare_dependency()
+
+libdaos = cc.find_library('daos')
+libdfs = cc.find_library('dfs')
+dfs = declare_dependency(dependencies: [libdaos, libdfs])
 
 glusterfs = not_found
 glusterfs_ftruncate_has_stat = false
