@@ -357,7 +357,7 @@ else
   # This is a fatal error, but don't report it yet, because we
   # might be going to just print the --help text, or it might
   # be the result of a missing compiler.
-  targetos=bogus
+  targetos=linux
 fi
 
 if test ! -z "$cpu" ; then

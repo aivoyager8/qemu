@@ -109,6 +109,7 @@ foreach m : [
   [libnfs, 'nfs', files('nfs.c')],
   [libssh, 'ssh', files('ssh.c')],
   [rbd, 'rbd', files('rbd.c')],
+  [dfs, 'dfs', files('dfs.c')],
 ]
   if m[0].found()
     module_ss = ss.source_set()
