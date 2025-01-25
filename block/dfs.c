@@ -302,4 +302,4 @@ static void bdrv_dfs_init(void)
     bdrv_register(&bdrv_dfs);
 }
 
-block_init(bdrv_rbd_init);
+block_init(bdrv_dfs_init);
