@@ -4255,6 +4255,27 @@
             '*key-secret': 'str',
             '*server': ['InetSocketAddressBase'] } }
 
+
+  ##
+  # @BlockdevOptionsDFS:
+  #
+  # Driver specific block device options for DFS.
+  #
+  # @pool: The DFS pool name
+  #
+  # @container: The DFS container name
+  #
+  # @filename: The filename within the container
+  #
+  # Since: 9.0
+  ##
+  { 'struct': 'BlockdevOptionsDFS',
+    'data': { 'pool': 'str',
+              'container': 'str',
+              'filename': 'str',
+              'namespace': 'str' } }
+
+
 ##
 # @ReplicationMode:
 #
