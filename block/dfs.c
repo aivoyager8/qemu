@@ -122,7 +122,6 @@ static BlockDriver bdrv_rbd = {
     .strong_runtime_opts    = qemu_rbd_strong_runtime_opts,
 };
 */
-
 typedef struct BDRVDFSState
 {
     daos_handle_t pool;
@@ -136,61 +135,114 @@ typedef struct BDRVDFSState
 } BDRVDFSState;
 
 /**
- * Parses a DFS (Distributed File System) filename and extracts relevant options.
+ * Tokenizes a string based on a delimiter character.
  *
- * @param filename The DFS filename to parse
- * @param options Dictionary to store the parsed options
- * @param errp Location for storing error information
+ * @param src   The source string to tokenize. If NULL, function returns NULL.
+ * @param delim The delimiter character to split on.
+ * @param p     Pointer to store the remaining string after the token.
+ *              Will be set to NULL if no delimiter is found.
+ *              If delimiter is found, will point to character after delimiter.
  *
- * This function takes a DFS filename, parses it and populates the options
- * dictionary with extracted parameters. Any parsing errors are reported
- * through the errp parameter.
+ * @return The token string up to the delimiter, or the entire string if no
+ *         delimiter is found. Returns NULL if src is NULL.
+ *
+ * @note The function modifies the original string by replacing delimiter with '\0'.
+ */
+static char *qemu_dfs_next_tok(char *src, char delim, char **p)
+{
+    char *end;
+
+    *p = NULL;
+    if (src == NULL)
+    {
+        return NULL;
+    }
+
+    end = strchr(src, delim);
+    if (end)
+    {
+        *end = '\0';
+        *p = end + 1;
+    }
+    return src;
+}
+
+/**
+ * @brief Parses a DFS (Distributed File System) URL into its components
+ *
+ * Parses a filename in the format "dfs:pool/container/file" and stores the components
+ * in the provided options dictionary.
+ *
+ * The format must be exactly:
+ * - Start with "dfs:" prefix
+ * - Followed by pool name
+ * - Followed by container name
+ * - Followed by file name
+ * Each component separated by forward slashes.
+ *
+ * @param filename The DFS URL string to parse
+ * @param options Dictionary to store the parsed components:
+ *                - "pool": Pool name
+ *                - "container": Container name
+ *                - "filename": File path
+ * @param errp Location to store error information
+ *
+ * @note The function will set an error and return early if:
+ *       - The filename doesn't start with "dfs:"
+ *       - Pool name is missing or empty
+ *       - Container name is missing or empty
+ *       - File name is missing or empty
  */
 static void qemu_dfs_parse_filename(const char *filename, QDict *options, Error **errp)
 {
-    char *pool_name, *container_name, *file_path;
-    const char *p, *container_start;
+    const char *start;
+    char *p, *buf;
+    char *pool, *container, *file;
 
-    if (strncmp(filename, "dfs:", 4))
+    if (!strstart(filename, "dfs:", &start))
     {
-        error_setg(errp, "Invalid DFS URL prefix");
-        return;
-    }
-    p = strchr(filename, ':');
-    if (!p)
-    {
-        error_setg(errp, "Missing pool/container specification");
+        error_setg(errp, "Filename must start with 'dfs:'");
         return;
     }
 
-    p++;
-    container_start = strchr(p, '/');
-    if (!container_start)
+    buf = g_strdup(start);
+    p = buf;
+
+    // 解析 pool
+    pool = qemu_dfs_next_tok(p, '/', &p);
+    if (!pool || !*pool)
     {
-        error_setg(errp, "Invalid pool/container specification");
-        return;
+        error_setg(errp, "Pool name must be specified");
+        goto done;
+    }
+    qdict_put_str(options, "pool", pool);
+    const char *poolname = qdict_get_str(options, "pool");
+    if (!poolname)
+    {
+        error_setg(errp, "pool option not found");
+        goto done;
     }
 
-    pool_name = g_strndup(p, container_start - p);
-    container_start++;
-    p = strchr(container_start, '/');
-    if (!p)
+    // 解析 container
+    container = qemu_dfs_next_tok(p, '/', &p);
+    if (!container || !*container)
     {
-        g_free(pool_name);
-        error_setg(errp, "Missing file path specification");
-        return;
+        error_setg(errp, "Container name must be specified");
+        goto done;
     }
+    qdict_put_str(options, "container", container);
+    // 解析 file
+    file = p;
+    if (!file || !*file)
+    {
+        error_setg(errp, "File name must be specified");
+        goto done;
+    }
+    qdict_put_str(options, "dfilename", file);
+    qdict_put_str(options, "filename", filename);
 
-    container_name = g_strndup(container_start, p - container_start);
-    file_path = g_strdup(p + 1);
-
-    qdict_put_str(options, "pool", pool_name);
-    qdict_put_str(options, "container", container_name);
-    qdict_put_str(options, "file", file_path);
-    g_free(pool_name);
-    g_free(container_name);
-    g_free(file_path);
-    return;
+done:
+    g_free(buf);
 }
 
 /**
@@ -206,7 +258,6 @@ static int qemu_dfs_convert_options(QDict *options, BlockdevOptionsDFS **opts,
                                     Error **errp)
 {
     Visitor *v;
-
     /* Convert the remaining options into a QAPI object */
     v = qobject_input_visitor_new_flat_confused(options, errp);
     if (!v)
@@ -220,7 +271,6 @@ static int qemu_dfs_convert_options(QDict *options, BlockdevOptionsDFS **opts,
     {
         return -EINVAL;
     }
-
     return 0;
 }
 
@@ -231,25 +281,44 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
     int rc;
     BDRVDFSState *s = bs->opaque;
     BlockdevOptionsDFS *opts = NULL;
+    Error *local_err = NULL;
+    const QDictEntry *e;
 
-    rc = qemu_dfs_convert_options(options, &opts, errp);
-    if (rc)
+    rc = qemu_dfs_convert_options(options, &opts, &local_err);
+    if (local_err)
     {
-        error_setg(errp, "Failed to convert options: %d", rc);
+        error_propagate(errp, local_err);
         return rc;
+    }
+
+    if (opts == NULL)
+    {
+        error_setg(errp, "Failed to convert options");
+        goto err;
+    }
+
+    if (opts->pool == NULL || opts->container == NULL || opts->dfilename == NULL)
+    {
+        error_setg(errp, "Missing pool, container or filename");
+        goto err;
     }
 
     // 获取pool/container/file信息
     s->pool_name = g_strdup(opts->pool);
     s->container_name = g_strdup(opts->container);
-    s->file_name = g_strdup(opts->filename);
+    s->file_name = g_strdup(opts->dfilename);
+
+    while ((e = qdict_first(options))) {
+        qdict_del(options, e->key);
+    }
+
 
     // 初始化DFS
     rc = dfs_init();
     if (rc)
     {
         error_setg(errp, "Failed to initialize DFS: %d", rc);
-        return -rc;
+        goto err;
     }
 
     // dfs_connect(const char *pool, const char *sys, const char *cont, int flags, dfs_attr_t *attr,  dfs_t **_dfs)
@@ -258,7 +327,7 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
     {
         error_setg(errp, "Failed to connect to pool %s container %s: %d",
                    s->pool_name, s->container_name, rc);
-        return -rc;
+        goto err;
     }
 
     // 打开一个默认的NameSpace, 用于存储文件.
@@ -346,8 +415,8 @@ static void qemu_dfs_close(BlockDriverState *bs)
     {
         g_free(s->pool_name);
     }
-    g_free(s);
 }
+
 
 /**
  * Converts a QEMU I/O vector to a DFS scatter-gather list.
@@ -366,17 +435,30 @@ static void qemu_dfs_close(BlockDriverState *bs)
 static int qiov_to_sg_list(QEMUIOVector *qiov, d_sg_list_t *sg_list)
 {
     int i;
+    uint64_t total_size = 0;
 
+    // 1. 计算总大小
+    for (i = 0; i < qiov->niov; i++) {
+        total_size += qiov->iov[i].iov_len;
+    }
+    
+    if (total_size == 0) {
+        error_setg(&error_abort, "QEMU I/O vector is empty");
+        return -EINVAL;
+    }
+
+    // 2. 分配 sg_list
     sg_list->sg_nr = qiov->niov;
+    sg_list->sg_nr_out = 0;
     sg_list->sg_iovs = calloc(qiov->niov, sizeof(*sg_list->sg_iovs));
-    if (sg_list->sg_iovs == NULL)
-    {
+    if (!sg_list->sg_iovs) {
         return -ENOMEM;
     }
 
-    for (i = 0; i < qiov->niov; i++)
-    {
+    // 3. 复制 IOV
+    for (i = 0; i < qiov->niov; i++) {
         sg_list->sg_iovs[i].iov_buf = qiov->iov[i].iov_base;
+        sg_list->sg_iovs[i].iov_buf_len = qiov->iov[i].iov_len;
         sg_list->sg_iovs[i].iov_len = qiov->iov[i].iov_len;
     }
 
@@ -419,8 +501,7 @@ static int coroutine_fn qemu_dfs_co_preadv(BlockDriverState *bs,
     rc = dfs_read(s->dfs, s->file, &sgl, offset, &read_size, NULL);
     if (rc)
     {
-        free(sgl.sg_iovs);
-        return -rc;
+        error_setg(&error_abort, "Failed to read from DFS file");
     }
 
     free(sgl.sg_iovs);
@@ -448,7 +529,6 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
 {
     int rc;
     BDRVDFSState *s = bs->opaque;
-
     assert(!qiov || qiov->size == bytes);
 
     d_sg_list_t sgl;
@@ -463,12 +543,10 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
     rc = dfs_write(s->dfs, s->file, &sgl, offset, NULL);
     if (rc)
     {
-        free(sgl.sg_iovs);
-        return -rc;
+        error_setg(&error_abort, "Failed to write to DFS file");
     }
-
     free(sgl.sg_iovs);
-    return 0;
+    return rc;
 }
 
 /**
@@ -485,6 +563,7 @@ static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
     int rc;
     BDRVDFSState *s = bs->opaque;
     size_t size;
+
     if (!s->file || !s->dfs)
     {
         error_setg(&error_abort, "DFS file not open");
@@ -497,9 +576,18 @@ static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
     {
         return rc;
     }
-
     return size;
 }
+
+
+static const char *const qemu_dfs_runtime_opts[] = {
+    "pool",
+    "container", 
+    "dfilename",
+    NULL
+};
+
+
 
 static BlockDriver bdrv_dfs = {
     .format_name = "dfs",
@@ -512,6 +600,8 @@ static BlockDriver bdrv_dfs = {
     .bdrv_co_preadv = qemu_dfs_co_preadv,
     .bdrv_co_pwritev = qemu_dfs_co_pwritev,
     .bdrv_co_getlength = qemu_dfs_co_getlength,
+
+    .strong_runtime_opts = qemu_dfs_runtime_opts,
 };
 
 static void bdrv_dfs_init(void)

@@ -3199,7 +3199,7 @@
             'luks', 'nbd', 'nfs', 'null-aio', 'null-co', 'nvme',
             { 'name': 'nvme-io_uring', 'if': 'CONFIG_BLKIO' },
             'parallels', 'preallocate', 'qcow', 'qcow2', 'qed', 'quorum',
-            'raw', 'rbd',
+            'raw', 'rbd', 'dfs',
             { 'name': 'replication', 'if': 'CONFIG_REPLICATION' },
             'ssh', 'throttle', 'vdi', 'vhdx',
             { 'name': 'virtio-blk-vfio-pci', 'if': 'CONFIG_BLKIO' },
@@ -4265,15 +4265,15 @@
   #
   # @container: The DFS container name
   #
-  # @filename: The filename within the container
+  # @dfilename: The filename within the container
+  #
   #
   # Since: 9.0
   ##
   { 'struct': 'BlockdevOptionsDFS',
     'data': { 'pool': 'str',
               'container': 'str',
-              'filename': 'str',
-              'namespace': 'str' } }
+              'dfilename': 'str'} }
 
 
 ##
@@ -4727,6 +4727,7 @@
       'quorum':     'BlockdevOptionsQuorum',
       'raw':        'BlockdevOptionsRaw',
       'rbd':        'BlockdevOptionsRbd',
+      'dfs':        'BlockdevOptionsDFS',
       'replication': { 'type': 'BlockdevOptionsReplication',
                        'if': 'CONFIG_REPLICATION' },
       'snapshot-access': 'BlockdevOptionsGenericFormat',
