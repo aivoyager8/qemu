@@ -510,27 +510,55 @@ static int qiov_to_sg_list(const QEMUIOVector *qiov, d_sg_list_t *sg_list)
  */
 static int coroutine_fn qemu_dfs_co_preadv(BlockDriverState *bs,
                                            int64_t offset, int64_t bytes,
-                                           QEMUIOVector *qiov,
+                                           QEMUIOVector *qiov, 
                                            BdrvRequestFlags flags)
 {
-    int rc;
-    BDRVDFSState *s = bs->opaque;
-    daos_size_t read_size;
-    assert(!qiov || qiov->size == bytes);
+    int rc = 0;
+    BDRVDFSState *s;
+    daos_size_t read_size = 0;
+    d_sg_list_t sgl = {0};
 
-    d_sg_list_t sgl;
+    /* Parameter validation */
+    if (!bs || !qiov) {
+        return -EINVAL;
+    }
+
+    s = bs->opaque;
+    if (!s || !s->dfs || !s->file) {
+        return -ENOENT;
+    }
+
+    /* Validate offset and size */
+    if (offset < 0 || bytes < 0) {
+        return -EINVAL;
+    }
+
+    /* Verify qiov size matches bytes requested */
+    if (qiov->size != bytes) {
+        return -EINVAL;
+    }
+
+    /* Convert QEMU I/O vector to DFS scatter-gather list */
     rc = qiov_to_sg_list(qiov, &sgl);
-    if (rc)
-    {
-        error_setg(&error_abort, "Failed to convert QEMU I/O vector to DFS scatter-gather list");
+    if (rc) {
+        error_setg(&error_abort, "Failed to convert I/O vector: %d", rc);
         return rc;
     }
 
-    // 读取文件
+    /* Read from file */
     rc = dfs_read(s->dfs, s->file, &sgl, offset, &read_size, NULL);
-    if (rc)
-    {
-        error_setg(&error_abort, "Failed to read from DFS file");
+    if (rc) {
+        error_setg(&error_abort, "DFS read failed (rc=%d): %s", 
+                  rc, strerror(abs(rc)));
+        free(sgl.sg_iovs);
+        return rc;
+    }
+
+    /* Check if we read the expected amount */
+    if (read_size != bytes) {
+        /* Not necessarily an error - could be EOF */
+        info_report("Partial read: expected %"PRId64" bytes, got %zu", 
+                   bytes, read_size); 
     }
 
     free(sgl.sg_iovs);
@@ -556,26 +584,57 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
                                             QEMUIOVector *qiov,
                                             BdrvRequestFlags flags)
 {
-    int rc;
-    BDRVDFSState *s = bs->opaque;
-    assert(!qiov || qiov->size == bytes);
+    int rc = 0;
+    BDRVDFSState *s;
+    daos_size_t written_size = 0;
+    d_sg_list_t sgl = {0};
 
-    d_sg_list_t sgl;
+    /* Parameter validation */
+    if (!bs || !qiov) {
+        return -EINVAL;
+    }
+
+    s = bs->opaque;
+    if (!s || !s->dfs || !s->file) {
+        return -ENOENT;
+    }
+
+    /* Validate offset and size */
+    if (offset < 0 || bytes < 0) {
+        return -EINVAL;
+    }
+
+    /* Verify qiov size matches bytes requested */
+    if (qiov->size != bytes) {
+        return -EINVAL;
+    }
+
+    /* Convert QEMU I/O vector to DFS scatter-gather list */
     rc = qiov_to_sg_list(qiov, &sgl);
-    if (rc)
-    {
-        error_setg(&error_abort, "Failed to convert QEMU I/O vector to DFS scatter-gather list");
+    if (rc) {
+        error_setg(&error_abort, "Failed to convert I/O vector: %d", rc);
         return rc;
     }
 
-    // 写入文件
-    rc = dfs_write(s->dfs, s->file, &sgl, offset, NULL);
-    if (rc)
-    {
-        error_setg(&error_abort, "Failed to write to DFS file");
+    /* Write to file */
+    rc = dfs_write(s->dfs, s->file, &sgl, offset, &written_size, NULL);
+    if (rc) {
+        error_setg(&error_abort, "DFS write failed (rc=%d): %s",
+                  rc, strerror(abs(rc)));
+        free(sgl.sg_iovs);
+        return rc;
     }
+
+    /* Check if we wrote the expected amount */
+    if (written_size != bytes) {
+        error_setg(&error_abort, "Partial write: expected %"PRId64" bytes, wrote %zu",
+                  bytes, written_size);
+        free(sgl.sg_iovs);
+        return -EIO;
+    }
+
     free(sgl.sg_iovs);
-    return rc;
+    return written_size;
 }
 
 /**
@@ -618,7 +677,7 @@ static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
     }
 
     /* Check for valid size */
-    if (size < 0 || size > INT64_MAX) {
+    if (size > INT64_MAX) {
         error_setg(&error_abort, "Invalid file size: %zu", size);
         return -EOVERFLOW;
     }
