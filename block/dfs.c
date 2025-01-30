@@ -71,20 +71,26 @@ typedef struct BDRVDFSState
  */
 static char *qemu_dfs_next_tok(char *src, char delim, char **p)
 {
-    char *end;
-
-    *p = NULL;
-    if (src == NULL)
-    {
+    /* Validate input parameters */
+    if (!p) {
         return NULL;
     }
 
-    end = strchr(src, delim);
-    if (end)
-    {
+    *p = NULL;
+
+    if (!src) {
+        return NULL;
+    }
+
+    /* Find delimiter and split string */
+    char *end = strchr(src, delim);
+    if (end) {
+        /* Only modify the string if we found the delimiter */
         *end = '\0';
         *p = end + 1;
     }
+
+    /* Return start of token */
     return src;
 }
 
