@@ -286,7 +286,7 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
     // Open/create default namespace
     rc = dfs_open(s->dfs, NULL, DEFAULT_NS,
                   S_IWUSR | S_IRUSR | S_IFDIR,  // Mode
-                  O_RDWR | O_CREAT,             // Flags
+                  O_RDWR,             // Flags
                   0, 0, NULL, &s->namespace);
     if (rc || !s->namespace) {
         error_setg(errp, "Failed to open namespace %s: %d", 
@@ -296,8 +296,8 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
 
     // Open/create file within namespace
     rc = dfs_open(s->dfs, s->namespace, s->file_name,
-                  S_IWUSR | S_IRUSR | S_IFREG,  // Mode
-                  O_RDWR | O_CREAT,             // Flags
+                  S_IWUSR | S_IRUSR | S_IFREG,  // Mode 
+                  O_RDWR,                        // Flags - removed O_CREAT
                   0, 0, NULL, &s->file);
     if (rc || !s->file) {
         error_setg(errp, "Failed to open file %s: %d", 
