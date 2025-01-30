@@ -116,53 +116,82 @@ static char *qemu_dfs_next_tok(char *src, char delim, char **p)
  */
 static void qemu_dfs_parse_filename(const char *filename, QDict *options, Error **errp)
 {
+    char *buf = NULL;
     const char *start;
-    char *p, *buf;
-    char *pool, *container, *file;
+    char *next_ptr = NULL;
+    char *pool_name = NULL; 
+    char *container_name = NULL;
+    char *file_name = NULL;
 
-    if (!strstart(filename, "dfs:", &start))
-    {
+    /* Validate input parameters */
+    if (!filename || !options || !errp) {
+        error_setg(errp, "Invalid parameters");
+        return;
+    }
+
+    /* Check prefix */
+    if (!strstart(filename, "dfs:", &start)) {
         error_setg(errp, "Filename must start with 'dfs:'");
         return;
     }
 
+    /* Skip empty path after prefix */
+    if (!*start) {
+        error_setg(errp, "Empty path after dfs: prefix");
+        return;
+    }
+
+    /* Duplicate string for tokenization */
     buf = g_strdup(start);
-    p = buf;
+    if (!buf) {
+        error_setg(errp, "Memory allocation failed");
+        return;
+    }
 
-    // 解析 pool
-    pool = qemu_dfs_next_tok(p, '/', &p);
-    if (!pool || !*pool)
-    {
+    /* Parse pool name */
+    pool_name = qemu_dfs_next_tok(buf, '/', &next_ptr);
+    if (!pool_name || !*pool_name) {
         error_setg(errp, "Pool name must be specified");
-        goto done;
-    }
-    qdict_put_str(options, "pool", pool);
-    const char *poolname = qdict_get_str(options, "pool");
-    if (!poolname)
-    {
-        error_setg(errp, "pool option not found");
-        goto done;
+        goto cleanup;
     }
 
-    // 解析 container
-    container = qemu_dfs_next_tok(p, '/', &p);
-    if (!container || !*container)
-    {
+    /* Parse container name */
+    container_name = qemu_dfs_next_tok(next_ptr, '/', &next_ptr);
+    if (!container_name || !*container_name) {
         error_setg(errp, "Container name must be specified");
-        goto done;
+        goto cleanup;
     }
-    qdict_put_str(options, "container", container);
-    // 解析 file
-    file = p;
-    if (!file || !*file)
-    {
-        error_setg(errp, "File name must be specified");
-        goto done;
-    }
-    qdict_put_str(options, "dfilename", file);
-    qdict_put_str(options, "filename", filename);
 
-done:
+    /* Parse file name - everything after the second slash */
+    file_name = next_ptr;
+    if (!file_name || !*file_name) {
+        error_setg(errp, "File name must be specified");
+        goto cleanup;
+    }
+
+    /* Store values in options dictionary */
+    if (!qdict_haskey(options, "pool")) {
+        qdict_put_str(options, "pool", pool_name);
+    }
+    if (!qdict_haskey(options, "container")) {
+        qdict_put_str(options, "container", container_name);
+    }
+    if (!qdict_haskey(options, "dfilename")) {
+        qdict_put_str(options, "dfilename", file_name);
+    }
+    if (!qdict_haskey(options, "filename")) {
+        qdict_put_str(options, "filename", filename);
+    }
+
+    /* Verify all required options are present */
+    if (!qdict_get_try_str(options, "pool") ||
+        !qdict_get_try_str(options, "container") ||
+        !qdict_get_try_str(options, "dfilename")) {
+        error_setg(errp, "Failed to store required options");
+        goto cleanup;
+    }
+
+cleanup:
     g_free(buf);
 }
 
