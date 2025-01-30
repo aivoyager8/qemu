@@ -617,7 +617,7 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
     }
 
     /* Write to file */
-    rc = dfs_write(s->dfs, s->file, &sgl, offset, &written_size, NULL);
+    rc = dfs_write(s->dfs, s->file, &sgl, offset, NULL);
     if (rc) {
         error_setg(&error_abort, "DFS write failed (rc=%d): %s",
                   rc, strerror(abs(rc)));
@@ -1075,6 +1075,44 @@ static const char *const qemu_dfs_runtime_opts[] = {
     NULL
 };
 
+
+/**
+ * Flushes the RBD (RADOS Block Device) block driver state.
+ * 
+ * This coroutine function ensures all pending writes are committed to storage
+ * for the given block device state.
+ * 
+ * @param bs    Pointer to the block driver state
+ * @return      0 on success, negative errno on failure
+ */
+static int coroutine_fn qemu_dfs_co_flush(BlockDriverState *bs)
+{
+    int rc;
+    BDRVDFSState *s;
+
+    /* Parameter validation */
+    if (!bs) {
+        return -EINVAL;
+    }
+
+    s = bs->opaque;
+    if (!s || !s->dfs || !s->file) {
+        error_setg(&error_abort, "Invalid DFS state");
+        return -ENOENT;
+    }
+
+    /* Sync file first for file-level durability */
+    rc = dfs_sync(s->dfs); 
+    if (rc) {
+        error_setg(&error_abort, "DFS sync failed (rc=%d): %s",
+                  rc, strerror(abs(rc)));
+        return rc;
+    }
+
+    return 0;
+}
+
+
 /**
  * Block driver definition for DFS (Distributed File System).
  */
@@ -1091,6 +1129,7 @@ static BlockDriver bdrv_dfs = {
 
     .bdrv_co_preadv = qemu_dfs_co_preadv,
     .bdrv_co_pwritev = qemu_dfs_co_pwritev,
+    .bdrv_co_flush_to_disk = qemu_dfs_co_flush,
     .bdrv_co_getlength = qemu_dfs_co_getlength,
     .bdrv_co_truncate = qemu_dfs_co_truncate,
 
