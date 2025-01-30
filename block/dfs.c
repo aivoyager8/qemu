@@ -811,7 +811,6 @@ cleanup:
  */
 static int qemu_dfs_co_create(BlockdevCreateOptions *options, Error **errp)
 {
-    warn_report("DFS Create: %s", __func__);
     return qemu_dfs_do_create(options, NULL, NULL, errp);
 }
 
