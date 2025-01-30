@@ -33,7 +33,7 @@
 
 #define DEFAULT_NS "xblock" // 默认的数据目录名称
 
-/*
+/**
  * When specifying the image filename use:
  *
  * dfs:poolname/containername/filename[@snapshotname][:option1=value1[:option2=value2...]]
@@ -1112,6 +1112,64 @@ static int coroutine_fn qemu_dfs_co_flush(BlockDriverState *bs)
     return 0;
 }
 
+/**
+ * Starts a coroutine to discard data from a DFS (Distributed File System) block device.
+ *
+ * This coroutine function discards the specified range of data from the block device.
+ *
+ * @param bs     Pointer to the block driver state
+ * @param offset Offset within the block device to start discarding data
+ * @param bytes  Number of bytes to discard
+ * @return       0 on success, negative errno on failure
+ */
+static int coroutine_fn qemu_dfs_co_pdiscard(BlockDriverState *bs,
+                                             int64_t offset, int64_t bytes)
+{
+    BDRVDFSState *s;
+    daos_size_t size;
+    int rc;
+
+    /* Fast path validation */
+    if (!bs || offset < 0 || bytes <= 0) {
+        return -EINVAL;
+    }
+
+    s = bs->opaque;
+    if (!s || !s->dfs || !s->file) {
+        return -ENOENT; 
+    }
+
+    /* Check for overflow */
+    if (offset + bytes < offset) {
+        return -EINVAL;
+    }
+
+    /* Get current file size */
+    rc = dfs_get_size(s->dfs, s->file, &size);
+    if (rc) {
+        return rc;
+    }
+
+    /* Fast path - nothing to discard if beyond EOF */
+    if (offset >= size) {
+        return 0;
+    }
+
+    /* Adjust bytes if needed */
+    if (offset + bytes > size) {
+        bytes = size - offset;
+    }
+
+    /* Perform discard */
+    rc = dfs_punch(s->dfs, s->file, offset, bytes);
+    if (rc) {
+        return rc;
+    }
+
+    /* Ensure durability */
+    return dfs_sync(s->dfs);
+}
+
 
 /**
  * Block driver definition for DFS (Distributed File System).
@@ -1130,6 +1188,7 @@ static BlockDriver bdrv_dfs = {
     .bdrv_co_preadv = qemu_dfs_co_preadv,
     .bdrv_co_pwritev = qemu_dfs_co_pwritev,
     .bdrv_co_flush_to_disk = qemu_dfs_co_flush,
+    .bdrv_co_pdiscard = qemu_dfs_co_pdiscard,
     .bdrv_co_getlength = qemu_dfs_co_getlength,
     .bdrv_co_truncate = qemu_dfs_co_truncate,
 
