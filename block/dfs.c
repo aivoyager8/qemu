@@ -397,41 +397,66 @@ static void qemu_dfs_close(BlockDriverState *bs)
  * NOTE: This function allocates memory for the scatter-gather list.
  *         The caller is responsible for freeing the memory.
  */
-static int qiov_to_sg_list(QEMUIOVector *qiov, d_sg_list_t *sg_list)
+/**
+ * Converts a QEMU I/O vector to a DFS scatter-gather list.
+ * 
+ * @param qiov      Source QEMU I/O vector to convert
+ * @param sg_list   Target DFS scatter-gather list to populate
+ *
+ * @return 0 on success, negative errno on failure
+ *
+ * @note The caller must free sg_list->sg_iovs after use
+ */
+static int qiov_to_sg_list(const QEMUIOVector *qiov, d_sg_list_t *sg_list)
 {
-    int i;
+    int ret = 0;
     uint64_t total_size = 0;
 
-    // 1. 计算总大小
-    for (i = 0; i < qiov->niov; i++)
-    {
-        total_size += qiov->iov[i].iov_len;
-    }
-
-    if (total_size == 0)
-    {
-        error_setg(&error_abort, "QEMU I/O vector is empty");
+    if (!qiov || !sg_list) {
         return -EINVAL;
     }
 
-    // 2. 分配 sg_list
-    sg_list->sg_nr = qiov->niov;
-    sg_list->sg_nr_out = 0;
+    if (qiov->niov == 0 || !qiov->iov) {
+        return -EINVAL;
+    }
+
+    /* Initialize sg_list to safe values */
+    memset(sg_list, 0, sizeof(*sg_list));
+
+    /* Calculate total size and validate iov entries */
+    for (int i = 0; i < qiov->niov; i++) {
+        if (!qiov->iov[i].iov_base && qiov->iov[i].iov_len > 0) {
+            return -EINVAL;
+        }
+        
+        /* Check for overflow */
+        if (total_size + qiov->iov[i].iov_len < total_size) {
+            return -EOVERFLOW;
+        }
+        total_size += qiov->iov[i].iov_len;
+    }
+
+    if (total_size == 0) {
+        return -EINVAL;
+    }
+
+    /* Allocate sg_iovs array */
     sg_list->sg_iovs = calloc(qiov->niov, sizeof(*sg_list->sg_iovs));
-    if (!sg_list->sg_iovs)
-    {
+    if (!sg_list->sg_iovs) {
         return -ENOMEM;
     }
 
-    // 3. 复制 IOV
-    for (i = 0; i < qiov->niov; i++)
-    {
+    /* Copy IOV entries */
+    sg_list->sg_nr = qiov->niov;
+    sg_list->sg_nr_out = 0;
+
+    for (int i = 0; i < qiov->niov; i++) {
         sg_list->sg_iovs[i].iov_buf = qiov->iov[i].iov_base;
         sg_list->sg_iovs[i].iov_buf_len = qiov->iov[i].iov_len;
         sg_list->sg_iovs[i].iov_len = qiov->iov[i].iov_len;
     }
 
-    return 0;
+    return ret;
 }
 
 /**
