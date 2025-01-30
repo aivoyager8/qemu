@@ -590,21 +590,39 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
 static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
 {
     int rc;
-    BDRVDFSState *s = bs->opaque;
-    size_t size;
+    BDRVDFSState *s;
+    daos_size_t size;
 
-    if (!s->file || !s->dfs)
-    {
+    /* Parameter validation */
+    if (!bs) {
+        error_setg(&error_abort, "Invalid block driver state");
+        return -EINVAL; 
+    }
+
+    s = bs->opaque;
+    if (!s) {
+        error_setg(&error_abort, "Invalid block driver opaque state");
+        return -EINVAL;
+    }
+
+    if (!s->dfs || !s->file) {
         error_setg(&error_abort, "DFS file not open");
         return -ENOENT;
     }
 
-    // 获取文件大小
+    /* Get file size */
     rc = dfs_get_size(s->dfs, s->file, &size);
-    if (rc)
-    {
+    if (rc) {
+        error_setg(&error_abort, "Failed to get DFS file size: %d", rc);
         return rc;
     }
+
+    /* Check for valid size */
+    if (size < 0 || size > INT64_MAX) {
+        error_setg(&error_abort, "Invalid file size: %zu", size);
+        return -EOVERFLOW;
+    }
+
     return size;
 }
 
@@ -620,24 +638,62 @@ static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
  *
  * @return 0 on success, negative errno on failure
  */
+/**
+ * Truncates a DFS file to the specified size.
+ *
+ * @param dfs     DFS filesystem handle
+ * @param file    DFS file object handle 
+ * @param offset  New size for the file
+ * @param errp    Error object for reporting errors
+ *
+ * @return 0 on success, negative errno on failure
+ *
+ * @note This function validates all input parameters and uses safe error reporting.
+ *       It ensures the offset is non-negative before truncating.
+ */
 static int qemu_dfs_do_truncate(dfs_t *dfs, dfs_obj_t *file, int64_t offset, Error **errp)
 {
     int rc;
 
-    if (!dfs || !file)
-    {
-        error_setg(errp, "DFS file not open");
+    /* Validate input parameters */
+    if (!errp) {
+        return -EINVAL;
+    }
+
+    if (!dfs || !file) {
+        error_setg(errp, "Invalid DFS handle or file object");
         return -ENOENT;
     }
 
-    // 截断文件
-    // int dfs_punch(dfs_t *dfs, dfs_obj_t *obj, daos_off_t offset, daos_size_t len);
-    rc = dfs_punch(dfs, file, offset, DFS_MAX_FSIZE);
-    if (rc)
-    {
-        error_setg(errp, "Failed to truncate file: %d", rc);
+    /* Validate offset */
+    if (offset < 0) {
+        error_setg(errp, "Invalid negative offset: %"PRId64, offset);
+        return -EINVAL;
     }
-    return rc;
+
+    /* Check for overflow */
+    if (offset > DFS_MAX_FSIZE) {
+        error_setg(errp, "Offset %"PRId64" exceeds maximum file size", offset);
+        return -EFBIG;
+    }
+
+    /* Attempt to truncate the file */
+    rc = dfs_punch(dfs, file, offset, DFS_MAX_FSIZE);
+    if (rc != 0) {
+        error_setg(errp, "Failed to truncate file (rc=%d): %s", 
+                  rc, strerror(abs(rc)));
+        return rc;
+    }
+
+    /* Sync changes to ensure durability */
+    rc = dfs_sync(dfs);
+    if (rc != 0) {
+        error_setg(errp, "Failed to sync file after truncate (rc=%d): %s",
+                  rc, strerror(abs(rc)));
+        return rc;
+    }
+
+    return 0;
 }
 
 /**
@@ -695,13 +751,6 @@ static int coroutine_fn qemu_dfs_co_truncate(BlockDriverState *bs,
     rc = qemu_dfs_do_truncate(s->dfs, s->file, offset, errp);
     if (rc) {
         /* Error already set by qemu_dfs_do_truncate */
-        return rc;
-    }
-
-    /* Sync file after truncate to ensure durability */
-    rc = dfs_sync(s->dfs);
-    if (rc) {
-        error_setg(errp, "Failed to sync file after truncate: %d", rc);
         return rc;
     }
 
