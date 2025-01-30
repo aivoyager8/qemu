@@ -5171,6 +5171,23 @@
             '*encrypt' :        'RbdEncryptionCreateOptions' } }
 
 ##
+# @BlockdevCreateOptionsDFS:
+#
+# Driver specific image creation options for DFS.
+#
+# @location: Where to store the new DFS file
+#
+# @size: Size of the virtual disk in bytes
+#
+# Since: 8.2
+##
+{ 'struct': 'BlockdevCreateOptionsDFS',
+  'data': { 'location':         'BlockdevOptionsDFS',
+            'size':             'size',
+            '*chunk-size':      'size' } }
+
+
+##
 # @BlockdevVmdkSubformat:
 #
 # Subformat options for VMDK images

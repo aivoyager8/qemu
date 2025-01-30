@@ -31,6 +31,8 @@
 #include "daos.h"
 #include "daos_fs.h"
 
+#define DEFAULT_NS "xblock" // 默认的数据目录名称
+
 /*
  * When specifying the image filename use:
  *
@@ -41,87 +43,6 @@
  * containername is the name of the daos container.
  */
 
-static QemuOptsList qemu_rbd_create_opts = {
-    .name = "rbd-create-opts",
-    .head = QTAILQ_HEAD_INITIALIZER(qemu_rbd_create_opts.head),
-    .desc = {
-        {.name = BLOCK_OPT_SIZE,
-         .type = QEMU_OPT_SIZE,
-         .help = "Virtual disk size"},
-        {.name = BLOCK_OPT_CLUSTER_SIZE,
-         .type = QEMU_OPT_SIZE,
-         .help = "RBD object size"},
-        {
-            .name = "password-secret",
-            .type = QEMU_OPT_STRING,
-            .help = "ID of secret providing the password",
-        },
-        {
-            .name = "encrypt.format",
-            .type = QEMU_OPT_STRING,
-            .help = "Encrypt the image, format choices: 'luks', 'luks2'",
-        },
-        {
-            .name = "encrypt.cipher-alg",
-            .type = QEMU_OPT_STRING,
-            .help = "Name of encryption cipher algorithm"
-                    " (allowed values: aes-128, aes-256)",
-        },
-        {
-            .name = "encrypt.key-secret",
-            .type = QEMU_OPT_STRING,
-            .help = "ID of secret providing LUKS passphrase",
-        },
-        {/* end of list */}}};
-
-// static const char *const qemu_rbd_strong_runtime_opts[] = {
-//     "pool",
-//     "namespace",
-//     "image",
-//     "conf",
-//     "snapshot",
-//     "user",
-//     "server.",
-//     "password-secret",
-//     NULL
-// };
-
-/*
-static BlockDriver bdrv_rbd = {
-    .format_name            = "rbd",
-    .instance_size          = sizeof(BDRVRBDState),
-    .bdrv_parse_filename    = qemu_rbd_parse_filename,
-    .bdrv_file_open         = qemu_rbd_open,
-    .bdrv_close             = qemu_rbd_close,
-    .bdrv_reopen_prepare    = qemu_rbd_reopen_prepare,
-    .bdrv_co_create         = qemu_rbd_co_create,
-    .bdrv_co_create_opts    = qemu_rbd_co_create_opts,
-    .bdrv_has_zero_init     = bdrv_has_zero_init_1,
-    .bdrv_co_get_info       = qemu_rbd_co_get_info,
-    .bdrv_get_specific_info = qemu_rbd_get_specific_info,
-    .create_opts            = &qemu_rbd_create_opts,
-    .bdrv_co_getlength      = qemu_rbd_co_getlength,
-    .bdrv_co_truncate       = qemu_rbd_co_truncate,
-    .protocol_name          = "rbd",
-
-    .bdrv_co_preadv         = qemu_rbd_co_preadv,
-    .bdrv_co_pwritev        = qemu_rbd_co_pwritev,
-    .bdrv_co_flush_to_disk  = qemu_rbd_co_flush,
-    .bdrv_co_pdiscard       = qemu_rbd_co_pdiscard,
-#ifdef LIBRBD_SUPPORTS_WRITE_ZEROES
-    .bdrv_co_pwrite_zeroes  = qemu_rbd_co_pwrite_zeroes,
-#endif
-    .bdrv_co_block_status   = qemu_rbd_co_block_status,
-
-    .bdrv_snapshot_create   = qemu_rbd_snap_create,
-    .bdrv_snapshot_delete   = qemu_rbd_snap_remove,
-    .bdrv_snapshot_list     = qemu_rbd_snap_list,
-    .bdrv_snapshot_goto     = qemu_rbd_snap_rollback,
-    .bdrv_co_invalidate_cache = qemu_rbd_co_invalidate_cache,
-
-    .strong_runtime_opts    = qemu_rbd_strong_runtime_opts,
-};
-*/
 typedef struct BDRVDFSState
 {
     daos_handle_t pool;
@@ -274,104 +195,149 @@ static int qemu_dfs_convert_options(QDict *options, BlockdevOptionsDFS **opts,
     return 0;
 }
 
-#define DEFAULT_NS "xblock" // 默认的NameSpace
+/**
+ * Opens a DFS block device.
+ *
+ * This function initializes and connects to a DFS (Distributed File System) block device.
+ *
+ * @param bs      Pointer to the BlockDriverState structure representing the block device
+ * @param options QDict containing the block device options
+ * @param flags   Flags to control the behavior of the block device
+ * @param errp    Error object to store error information
+ *
+ * @return 0 on success, negative errno on failure
+ */
 static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
                          Error **errp)
 {
     int rc;
-    BDRVDFSState *s = bs->opaque;
+    BDRVDFSState *s;
     BlockdevOptionsDFS *opts = NULL;
     Error *local_err = NULL;
     const QDictEntry *e;
 
+    if (!bs || !options || !errp) {
+        return -EINVAL;
+    }
+
+    s = bs->opaque;
+    if (!s) {
+        error_setg(errp, "Invalid block driver state");
+        return -EINVAL;
+    }
+
+    // Initialize state to NULL
+    s->pool_name = NULL;
+    s->container_name = NULL;
+    s->file_name = NULL;
+    s->dfs = NULL;
+    s->namespace = NULL;
+    s->file = NULL;
+
+    // Convert options and validate
     rc = qemu_dfs_convert_options(options, &opts, &local_err);
-    if (local_err)
-    {
-        error_propagate(errp, local_err);
-        return rc;
+    if (rc || local_err) {
+        if (local_err) {
+            error_propagate(errp, local_err);
+        }
+        return rc ? rc : -EINVAL;
     }
 
-    if (opts == NULL)
-    {
-        error_setg(errp, "Failed to convert options");
+    if (!opts || !opts->pool || !opts->container || !opts->dfilename) {
+        error_setg(errp, "Missing required options (pool, container, or filename)");
+        rc = -EINVAL;
         goto err;
     }
 
-    if (opts->pool == NULL || opts->container == NULL || opts->dfilename == NULL)
-    {
-        error_setg(errp, "Missing pool, container or filename");
-        goto err;
-    }
-
-    // 获取pool/container/file信息
+    // Store path components with null checks
     s->pool_name = g_strdup(opts->pool);
     s->container_name = g_strdup(opts->container);
     s->file_name = g_strdup(opts->dfilename);
 
-    while ((e = qdict_first(options))) {
-        qdict_del(options, e->key);
+    if (!s->pool_name || !s->container_name || !s->file_name) {
+        error_setg(errp, "Failed to allocate path strings");
+        rc = -ENOMEM;
+        goto err;
     }
 
+    // Clear processed options safely
+    if (options) {
+        while ((e = qdict_first(options))) {
+            qdict_del(options, e->key);
+        }
+    }
 
-    // 初始化DFS
+    // Initialize DFS subsystem
     rc = dfs_init();
-    if (rc)
-    {
+    if (rc) {
         error_setg(errp, "Failed to initialize DFS: %d", rc);
         goto err;
     }
 
-    // dfs_connect(const char *pool, const char *sys, const char *cont, int flags, dfs_attr_t *attr,  dfs_t **_dfs)
-    rc = dfs_connect(s->pool_name, NULL, s->container_name, O_CREAT | O_RDWR, NULL, &s->dfs);
-    if (rc)
-    {
+    // Connect to DFS pool/container
+    rc = dfs_connect(s->pool_name, NULL, s->container_name, 
+                     O_CREAT | O_RDWR, NULL, &s->dfs);
+    if (rc || !s->dfs) {
         error_setg(errp, "Failed to connect to pool %s container %s: %d",
                    s->pool_name, s->container_name, rc);
         goto err;
     }
 
-    // 打开一个默认的NameSpace, 用于存储文件.
-    mode_t ns_mode = S_IWUSR | S_IRUSR | S_IFDIR;
-    int ns_flags = O_RDWR | O_CREAT; // 假设没有创建接口. 这里先一起处理吧.
-    rc = dfs_open(s->dfs, NULL, DEFAULT_NS, ns_mode, ns_flags, 0, 0, NULL, &s->namespace);
-    if (rc)
-    {
-        error_setg(errp, "Failed to open container %s: %d", s->container_name, rc);
+    // Open/create default namespace
+    rc = dfs_open(s->dfs, NULL, DEFAULT_NS,
+                  S_IWUSR | S_IRUSR | S_IFDIR,  // Mode
+                  O_RDWR | O_CREAT,             // Flags
+                  0, 0, NULL, &s->namespace);
+    if (rc || !s->namespace) {
+        error_setg(errp, "Failed to open namespace %s: %d", 
+                   DEFAULT_NS, rc);
         goto err;
     }
 
-    // 在默认的NameSpace下创建一个文件.
-    rc = dfs_open(s->dfs, s->namespace, s->file_name, S_IWUSR | S_IRUSR | S_IFREG, O_RDWR | O_CREAT, 0, 0, NULL, &s->file);
-    if (rc)
-    {
-        error_setg(errp, "Failed to open file %s: %d", s->file_name, rc);
+    // Open/create file within namespace
+    rc = dfs_open(s->dfs, s->namespace, s->file_name,
+                  S_IWUSR | S_IRUSR | S_IFREG,  // Mode
+                  O_RDWR | O_CREAT,             // Flags
+                  0, 0, NULL, &s->file);
+    if (rc || !s->file) {
+        error_setg(errp, "Failed to open file %s: %d", 
+                   s->file_name, rc);
         goto err;
     }
 
-    // 释放资源
-    if (opts)
-    {
-        qapi_free_BlockdevOptionsDFS(opts);
-    }
+    qapi_free_BlockdevOptionsDFS(opts);
     return 0;
 
 err:
-    if (opts)
-    {
+    // Clean up in reverse order of creation
+    if (s->file) {
+        dfs_release(s->file);
+        s->file = NULL;
+    }
+    
+    if (s->namespace) {
+        dfs_release(s->namespace);
+        s->namespace = NULL;
+    }
+    
+    if (s->dfs) {
+        dfs_disconnect(s->dfs);
+        s->dfs = NULL;
+        dfs_fini(); // Clean up DFS subsystem
+    }
+
+    g_free(s->file_name);
+    g_free(s->container_name); 
+    g_free(s->pool_name);
+    s->file_name = NULL;
+    s->container_name = NULL;
+    s->pool_name = NULL;
+
+    if (opts) {
         qapi_free_BlockdevOptionsDFS(opts);
     }
-
-    if (s->namespace)
-    {
-        dfs_release(s->namespace);
-    }
-
-    if (s->dfs)
-    {
-        dfs_disconnect(s->dfs);
-    }
-
-    return rc;
+    
+    return rc ? rc : -EIO;
 }
 
 /**
@@ -417,7 +383,6 @@ static void qemu_dfs_close(BlockDriverState *bs)
     }
 }
 
-
 /**
  * Converts a QEMU I/O vector to a DFS scatter-gather list.
  *
@@ -438,11 +403,13 @@ static int qiov_to_sg_list(QEMUIOVector *qiov, d_sg_list_t *sg_list)
     uint64_t total_size = 0;
 
     // 1. 计算总大小
-    for (i = 0; i < qiov->niov; i++) {
+    for (i = 0; i < qiov->niov; i++)
+    {
         total_size += qiov->iov[i].iov_len;
     }
-    
-    if (total_size == 0) {
+
+    if (total_size == 0)
+    {
         error_setg(&error_abort, "QEMU I/O vector is empty");
         return -EINVAL;
     }
@@ -451,12 +418,14 @@ static int qiov_to_sg_list(QEMUIOVector *qiov, d_sg_list_t *sg_list)
     sg_list->sg_nr = qiov->niov;
     sg_list->sg_nr_out = 0;
     sg_list->sg_iovs = calloc(qiov->niov, sizeof(*sg_list->sg_iovs));
-    if (!sg_list->sg_iovs) {
+    if (!sg_list->sg_iovs)
+    {
         return -ENOMEM;
     }
 
     // 3. 复制 IOV
-    for (i = 0; i < qiov->niov; i++) {
+    for (i = 0; i < qiov->niov; i++)
+    {
         sg_list->sg_iovs[i].iov_buf = qiov->iov[i].iov_base;
         sg_list->sg_iovs[i].iov_buf_len = qiov->iov[i].iov_len;
         sg_list->sg_iovs[i].iov_len = qiov->iov[i].iov_len;
@@ -579,27 +548,342 @@ static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
     return size;
 }
 
+/**
+ * Truncates a DFS (Distributed File System) block device.
+ *
+ * This function truncates the file to the specified size.
+ *
+ * @param dfs     DFS filesystem handle
+ * @param file    DFS file object
+ * @param offset  Offset to truncate the file to
+ * @param errp    Error object to store any error that occurs
+ *
+ * @return 0 on success, negative errno on failure
+ */
+static int qemu_dfs_do_truncate(dfs_t *dfs, dfs_obj_t *file, int64_t offset, Error **errp)
+{
+    int rc;
 
+    if (!dfs || !file)
+    {
+        error_setg(errp, "DFS file not open");
+        return -ENOENT;
+    }
+
+    // 截断文件
+    // int dfs_punch(dfs_t *dfs, dfs_obj_t *obj, daos_off_t offset, daos_size_t len);
+    rc = dfs_punch(dfs, file, offset, DFS_MAX_FSIZE);
+    if (rc)
+    {
+        error_setg(errp, "Failed to truncate file: %d", rc);
+    }
+    return rc;
+}
+
+/**
+ * Truncates a DFS (Distributed File System) block device.
+ *
+ * This function truncates the file to the specified size.
+ *
+ * @param bs      Block driver state
+ * @param offset  Offset to truncate the file to
+ * @param exact   If true, truncate the file to exactly the specified size
+ * @param prealloc Preallocation mode
+ * @param flags   Block device request flags
+ * @param errp    Error object to store any error that occurs
+ *
+ * @return 0 on success, negative errno on failure
+ */
+static int coroutine_fn qemu_dfs_co_truncate(BlockDriverState *bs,
+                                             int64_t offset, bool exact,
+                                             PreallocMode prealloc,
+                                             BdrvRequestFlags flags,
+                                             Error **errp)
+{
+    int rc;
+    BDRVDFSState *s = bs->opaque;
+
+    if (!s->file || !s->dfs)
+    {
+        error_setg(errp, "DFS file not open");
+        return -ENOENT;
+    }
+
+    // 截断文件
+    rc = qemu_dfs_do_truncate(s->dfs, s->file, offset, errp);
+    if (rc)
+    {
+        error_setg(errp, "Failed to truncate file: %d", rc);
+    }
+    return rc;
+}
+
+/**
+ * Creates a new DFS (Distributed File System) block device.
+ *
+ * @param options         Creation options for the block device
+ * @param keypairs       Key-value pairs for additional configuration (unused)
+ * @param password_secret Password secret for encrypted devices (unused)
+ * @param errp           Error object to store any error that occurs
+ *
+ * @return 0 on success, negative errno on failure
+ */
+static int qemu_dfs_do_create(BlockdevCreateOptions *options,
+                              const char *keypairs,
+                              const char *password_secret,
+                              Error **errp)
+{
+    int rc;
+    dfs_t *dfs = NULL;
+    dfs_obj_t *namespace = NULL;
+    dfs_obj_t *file = NULL;
+    uint64_t chunk_size = 0; // default chunk size 1MB
+
+    if (!options || options->driver != BLOCKDEV_DRIVER_DFS)
+    {
+        error_setg(errp, "Invalid options or driver type");
+        return -EINVAL;
+    }
+
+    BlockdevCreateOptionsDFS *opts = &options->u.dfs;
+    if (!opts->location)
+    {
+        error_setg(errp, "Missing location options");
+        return -EINVAL;
+    }
+
+    const char *pool = opts->location->pool;
+    const char *container = opts->location->container;
+    const char *filename = opts->location->dfilename;
+
+    if (!pool || !container || !filename)
+    {
+        error_setg(errp, "Missing pool, container or filename");
+        return -EINVAL;
+    }
+
+    if (opts->has_chunk_size)
+    {
+        chunk_size = opts->chunk_size;
+    }
+
+    info_report("DFS Create: pool=%s container=%s file=%s chunk_size=%lu",
+                pool, container, filename, chunk_size);
+
+    // Initialize DFS
+    rc = dfs_init();
+    if (rc)
+    {
+        error_setg(errp, "Failed to initialize DFS: %d", rc);
+        return rc;
+    }
+
+    // Connect to DFS
+    rc = dfs_connect(pool, NULL, container, O_CREAT | O_RDWR, NULL, &dfs);
+    if (rc)
+    {
+        error_setg(errp, "Failed to connect to pool %s container %s: %d",
+                   pool, container, rc);
+        goto cleanup;
+    }
+
+    // Create/open namespace
+    mode_t ns_mode = S_IWUSR | S_IRUSR | S_IFDIR;
+    int ns_flags = O_RDWR | O_CREAT;
+    rc = dfs_open(dfs, NULL, DEFAULT_NS, ns_mode, ns_flags, 0, 0, NULL, &namespace);
+    if (rc)
+    {
+        error_setg(errp, "Failed to open namespace %s: %d", DEFAULT_NS, rc);
+        goto cleanup;
+    }
+
+    // Create file
+    mode_t file_mode = S_IWUSR | S_IRUSR | S_IFREG;
+    int file_flags = O_RDWR | O_CREAT | O_EXCL;
+    rc = dfs_open(dfs, namespace, filename, file_mode, file_flags, 0, 0, NULL, &file);
+    if (rc)
+    {
+        error_setg(errp, "Failed to create file %s: %d", filename, rc);
+        goto cleanup;
+    }
+
+    // Trucnate file to the specified size
+    rc = qemu_dfs_do_truncate(dfs, file, opts->size, errp);
+    if (rc)
+    {
+        error_setg(errp, "Failed to truncate file %s: %d", filename, rc);
+        goto cleanup;
+    }
+
+cleanup:
+    if (file)
+    {
+        dfs_release(file);
+    }
+    if (namespace)
+    {
+        dfs_release(namespace);
+    }
+    if (dfs)
+    {
+        dfs_disconnect(dfs);
+    }
+    dfs_fini();
+
+    return rc;
+}
+
+/**
+ * Creates a new DFS (Distributed File System) block device.
+ *
+ * @param options   Pointer to BlockdevCreateOptions structure containing
+ *                 the parameters for creating the DFS block device
+ * @param errp     Pointer to Error structure for error reporting
+ *
+ * @return 0 on success, negative error code on failure
+ */
+static int qemu_dfs_co_create(BlockdevCreateOptions *options, Error **errp)
+{
+    warn_report("DFS Create: %s", __func__);
+    return qemu_dfs_do_create(options, NULL, NULL, errp);
+}
+
+/**
+ * Parses the filename and extracts the encryption options for a new DFS file.
+ *
+ **/
+static QemuOptsList qemu_dfs_create_opts = {
+    .name = "dfs-create-opts",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_dfs_create_opts.head),
+    .desc = {
+        {.name = BLOCK_OPT_SIZE,
+         .type = QEMU_OPT_SIZE,
+         .help = "Virtual disk size"},
+        {.name = BLOCK_OPT_OBJECT_SIZE,
+         .type = QEMU_OPT_SIZE,
+         .help = "DFS chunk size"},
+    }};
+
+// /**
+//  * Creates a new disk image with specified options using DFS (Distributed File System).
+//  *
+//  * @param drv       Block driver instance
+//  * @param filename  Path to the disk image file to be created
+//  * @param opts      Creation options for the new disk image
+//  * @param errp      Error object to store any error that occurs during creation
+//  *
+//  * @return 0 on success, negative errno on failure
+//  *
+//  * This is a coroutine function that handles the creation of a new disk image
+//  * in the DFS storage backend with the specified parameters and options.
+//  */
+static int coroutine_fn qemu_dfs_co_create_opts(BlockDriver *drv,
+                                                const char *filename,
+                                                QemuOpts *opts,
+                                                Error **errp)
+{
+    BlockdevCreateOptions *create_options = NULL;
+    BlockdevCreateOptionsDFS *dfs_opts;
+    BlockdevOptionsDFS *loc;
+    QDict *options = NULL;
+    int ret = -EINVAL;
+    const char *pool, *container, *dfilename;
+
+    create_options = g_new0(BlockdevCreateOptions, 1);
+    if (!create_options)
+    {
+        error_setg(errp, "Failed to allocate create options");
+        return -ENOMEM;
+    }
+
+    create_options->driver = BLOCKDEV_DRIVER_DFS;
+    dfs_opts = &create_options->u.dfs;
+
+    dfs_opts->location = g_new0(BlockdevOptionsDFS, 1);
+    if (!dfs_opts->location)
+    {
+        error_setg(errp, "Failed to allocate location options");
+        ret = -ENOMEM;
+        goto exit;
+    }
+
+    dfs_opts->size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                              BDRV_SECTOR_SIZE);
+    dfs_opts->chunk_size = qemu_opt_get_size_del(opts, BLOCK_OPT_OBJECT_SIZE, 0);
+    dfs_opts->has_chunk_size = (dfs_opts->chunk_size != 0);
+
+    options = qdict_new();
+    if (!options)
+    {
+        error_setg(errp, "Failed to allocate options dictionary");
+        ret = -ENOMEM;
+        goto exit;
+    }
+
+    qemu_dfs_parse_filename(filename, options, errp);
+    if (*errp)
+    {
+        goto exit;
+    }
+
+    loc = dfs_opts->location;
+    pool = qdict_get_try_str(options, "pool");
+    container = qdict_get_try_str(options, "container");
+    dfilename = qdict_get_try_str(options, "dfilename");
+
+    if (!pool || !container || !dfilename)
+    {
+        error_setg(errp, "Missing required options (pool, container, or filename)");
+        goto exit;
+    }
+
+    loc->pool = g_strdup(pool);
+    loc->container = g_strdup(container);
+    loc->dfilename = g_strdup(dfilename);
+
+    if (!loc->pool || !loc->container || !loc->dfilename)
+    {
+        error_setg(errp, "Failed to allocate strings for location");
+        ret = -ENOMEM;
+        goto exit;
+    }
+
+    ret = qemu_dfs_do_create(create_options, NULL, NULL, errp);
+
+exit:
+    qobject_unref(options);
+    qapi_free_BlockdevCreateOptions(create_options);
+    return ret;
+}
+
+/**
+ * Runtime options for the DFS block driver.
+ */
 static const char *const qemu_dfs_runtime_opts[] = {
     "pool",
-    "container", 
+    "container",
     "dfilename",
     NULL
 };
 
-
-
+/**
+ * Block driver definition for DFS (Distributed File System).
+ */
 static BlockDriver bdrv_dfs = {
     .format_name = "dfs",
     .instance_size = sizeof(BDRVDFSState),
     .bdrv_parse_filename = qemu_dfs_parse_filename,
     .bdrv_file_open = qemu_dfs_open,
     .bdrv_close = qemu_dfs_close,
+    .bdrv_co_create = qemu_dfs_co_create,
+    .bdrv_co_create_opts = qemu_dfs_co_create_opts,
+    .create_opts = &qemu_dfs_create_opts,
     .protocol_name = "dfs",
 
     .bdrv_co_preadv = qemu_dfs_co_preadv,
     .bdrv_co_pwritev = qemu_dfs_co_pwritev,
     .bdrv_co_getlength = qemu_dfs_co_getlength,
+    .bdrv_co_truncate = qemu_dfs_co_truncate,
 
     .strong_runtime_opts = qemu_dfs_runtime_opts,
 };
