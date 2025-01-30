@@ -626,21 +626,51 @@ static int coroutine_fn qemu_dfs_co_truncate(BlockDriverState *bs,
                                              Error **errp)
 {
     int rc;
-    BDRVDFSState *s = bs->opaque;
+    BDRVDFSState *s;
 
-    if (!s->file || !s->dfs)
-    {
+    if (!bs) {
+        error_setg(errp, "Invalid block driver state");
+        return -EINVAL;
+    }
+
+    s = bs->opaque;
+    if (!s) {
+        error_setg(errp, "Invalid block driver opaque state");
+        return -EINVAL;
+    }
+
+    if (!s->dfs || !s->file) {
         error_setg(errp, "DFS file not open");
         return -ENOENT;
     }
 
-    // 截断文件
-    rc = qemu_dfs_do_truncate(s->dfs, s->file, offset, errp);
-    if (rc)
-    {
-        error_setg(errp, "Failed to truncate file: %d", rc);
+    /* Validate offset */
+    if (offset < 0) {
+        error_setg(errp, "Invalid negative offset: %"PRId64, offset);
+        return -EINVAL;
     }
-    return rc;
+
+    /* Check if exact size is required but preallocation is also requested */
+    if (exact && prealloc != PREALLOC_MODE_OFF) {
+        error_setg(errp, "Cannot combine exact size with preallocation");
+        return -EINVAL;
+    }
+
+    /* Truncate file with validated parameters */
+    rc = qemu_dfs_do_truncate(s->dfs, s->file, offset, errp);
+    if (rc) {
+        /* Error already set by qemu_dfs_do_truncate */
+        return rc;
+    }
+
+    /* Sync file after truncate to ensure durability */
+    rc = dfs_sync(s->dfs, s->file);
+    if (rc) {
+        error_setg(errp, "Failed to sync file after truncate: %d", rc);
+        return rc;
+    }
+
+    return 0;
 }
 
 /**
