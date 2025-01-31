@@ -817,6 +817,146 @@ static int coroutine_fn qemu_dfs_co_truncate(BlockDriverState *bs,
 }
 
 /**
+ * Creates a new lock device with the specified options.
+ *
+ * @param options Pointer to the lock device creation options structure.
+ * @return 0 on success, negative error code on failure.
+ */
+static int qemu_dfs_do_create2(BlockdevCreateOptions *options,
+                               const char *keypairs,
+                               const char *password_secret,
+                               Error **errp)
+{
+    int rc = -EINVAL;
+    dfs_t *dfs = NULL;
+    dfs_obj_t *namespace = NULL;
+    dfs_obj_t *file = NULL;
+    dfs_attr_t *attr = NULL;
+    uint64_t chunk_size = 0; // default chunk size 1MB
+
+    daos_handle_t poh;              // Pool handle
+    uuid_t cont_uuid;               // Container UUID
+    daos_handle_t coh;              // Container handle
+
+    // Parameter validation
+    if (!options || !errp)
+    {
+        error_setg(errp, "Invalid parameters");
+        return -EINVAL;
+    }
+
+    if (options->driver != BLOCKDEV_DRIVER_DFS)
+    {
+        error_setg(errp, "Invalid driver type");
+        return -EINVAL;
+    }
+
+    BlockdevCreateOptionsDFS *opts = &options->u.dfs;
+    if (!opts->location)
+    {
+        error_setg(errp, "Missing location options");
+        return -EINVAL;
+    }
+
+    const char *pool = opts->location->pool;
+    const char *container = opts->location->container;
+    const char *filename = opts->location->dfilename;
+
+    if (!pool || !container || !filename)
+    {
+        error_setg(errp, "Missing pool, container or filename");
+        return -EINVAL;
+    }
+
+    // Set chunk size if provided
+    if (opts->has_chunk_size)
+    {
+        chunk_size = opts->chunk_size;
+    }
+
+    info_report("DFS Create: pool=%s container=%s file=%s chunk_size=%lu",
+                pool, container, filename, chunk_size);
+
+    rc = daos_pool_connect(pool, NULL, DAOS_PC_RW, &poh, NULL, NULL);
+    if (rc != 0)
+    {
+        error_setg(errp, "Failed to connect to pool %s: %d", pool, rc);
+        return rc;
+    }
+
+    rc = dfs_cont_create_with_label(poh, container, attr, &cont_uuid, &coh, &dfs);
+    if (rc != 0)
+    {
+        error_setg(errp, "Failed to create container %s: %d", container, rc);
+        goto cleanup;
+    }
+
+    // Create/open namespace
+    rc = dfs_open(dfs, NULL, DEFAULT_NS,
+                  S_IWUSR | S_IRUSR | S_IFDIR, // Mode
+                  O_RDWR | O_CREAT,            // Flags
+                  0, 0, NULL, &namespace);
+    if (rc != 0 || !namespace)
+    {
+        error_setg(errp, "Failed to open namespace %s: %d", DEFAULT_NS, rc);
+        goto cleanup;
+    }
+
+    // Create file with exclusive flag
+    rc = dfs_open(dfs, namespace, filename,
+                  S_IWUSR | S_IRUSR | S_IFREG, // Mode
+                  O_RDWR | O_CREAT | O_EXCL,   // Flags
+                  0, 0, NULL, &file);
+    if (rc != 0 || !file)
+    {
+        error_setg(errp, "Failed to create file %s: %d", filename, rc);
+        goto cleanup;
+    }
+
+    // Truncate file to the specified size
+    if (opts->size > 0)
+    {
+        rc = qemu_dfs_do_truncate(dfs, file, opts->size, errp);
+        if (rc != 0)
+        {
+            error_setg(errp, "Failed to truncate file %s to size %" PRId64 ": %d",
+                       filename, opts->size, rc);
+            goto cleanup;
+        }
+
+        // Sync after truncate to ensure durability
+        rc = dfs_sync(dfs);
+        if (rc != 0)
+        {
+            error_setg(errp, "Failed to sync file after truncate: %d", rc);
+            goto cleanup;
+        }
+    }
+
+    rc = 0; // Success
+
+cleanup:
+    if (file)
+    {
+        dfs_release(file);
+        file = NULL;
+    }
+    if (namespace)
+    {
+        dfs_release(namespace);
+        namespace = NULL;
+    }
+    if (dfs)
+    {
+        dfs_disconnect(dfs);
+        dfs = NULL;
+    }
+    dfs_fini();
+
+    return rc;
+}
+
+/**
  * Creates a new DFS (Distributed File System) block device.
  *
  * @param options         Creation options for the block device
@@ -827,9 +967,9 @@ static int coroutine_fn qemu_dfs_co_truncate(BlockDriverState *bs,
  * @return 0 on success, negative errno on failure
  */
 static int qemu_dfs_do_create(BlockdevCreateOptions *options,
-                             const char *keypairs,
-                             const char *password_secret,
-                             Error **errp)
+                              const char *keypairs,
+                              const char *password_secret,
+                              Error **errp)
 {
     int rc = -EINVAL;
     dfs_t *dfs = NULL;
@@ -838,18 +978,21 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options,
     uint64_t chunk_size = 0; // default chunk size 1MB
 
     // Parameter validation
-    if (!options || !errp) {
+    if (!options || !errp)
+    {
         error_setg(errp, "Invalid parameters");
         return -EINVAL;
     }
 
-    if (options->driver != BLOCKDEV_DRIVER_DFS) {
+    if (options->driver != BLOCKDEV_DRIVER_DFS)
+    {
         error_setg(errp, "Invalid driver type");
         return -EINVAL;
     }
 
     BlockdevCreateOptionsDFS *opts = &options->u.dfs;
-    if (!opts->location) {
+    if (!opts->location)
+    {
         error_setg(errp, "Missing location options");
         return -EINVAL;
     }
@@ -858,66 +1001,76 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options,
     const char *container = opts->location->container;
     const char *filename = opts->location->dfilename;
 
-    if (!pool || !container || !filename) {
+    if (!pool || !container || !filename)
+    {
         error_setg(errp, "Missing pool, container or filename");
         return -EINVAL;
     }
 
     // Set chunk size if provided
-    if (opts->has_chunk_size) {
+    if (opts->has_chunk_size)
+    {
         chunk_size = opts->chunk_size;
     }
 
     info_report("DFS Create: pool=%s container=%s file=%s chunk_size=%lu",
                 pool, container, filename, chunk_size);
 
+
     // Initialize DFS
     rc = dfs_init();
-    if (rc != 0) {
+    if (rc != 0)
+    {
         error_setg(errp, "Failed to initialize DFS: %d", rc);
         return rc;
     }
 
     // Connect to DFS
     rc = dfs_connect(pool, NULL, container, O_CREAT | O_RDWR, NULL, &dfs);
-    if (rc != 0 || !dfs) {
+    if (rc != 0 || !dfs)
+    {
         error_setg(errp, "Failed to connect to pool %s container %s: %d",
-                  pool, container, rc);
+                   pool, container, rc);
         goto cleanup;
     }
 
     // Create/open namespace
     rc = dfs_open(dfs, NULL, DEFAULT_NS,
-                  S_IWUSR | S_IRUSR | S_IFDIR,  // Mode
-                  O_RDWR | O_CREAT,             // Flags
+                  S_IWUSR | S_IRUSR | S_IFDIR, // Mode
+                  O_RDWR | O_CREAT,            // Flags
                   0, 0, NULL, &namespace);
-    if (rc != 0 || !namespace) {
+    if (rc != 0 || !namespace)
+    {
         error_setg(errp, "Failed to open namespace %s: %d", DEFAULT_NS, rc);
         goto cleanup;
     }
 
     // Create file with exclusive flag
     rc = dfs_open(dfs, namespace, filename,
-                  S_IWUSR | S_IRUSR | S_IFREG,  // Mode
-                  O_RDWR | O_CREAT | O_EXCL,    // Flags
+                  S_IWUSR | S_IRUSR | S_IFREG, // Mode
+                  O_RDWR | O_CREAT | O_EXCL,   // Flags
                   0, 0, NULL, &file);
-    if (rc != 0 || !file) {
+    if (rc != 0 || !file)
+    {
         error_setg(errp, "Failed to create file %s: %d", filename, rc);
         goto cleanup;
     }
 
     // Truncate file to the specified size
-    if (opts->size > 0) {
+    if (opts->size > 0)
+    {
         rc = qemu_dfs_do_truncate(dfs, file, opts->size, errp);
-        if (rc != 0) {
-            error_setg(errp, "Failed to truncate file %s to size %"PRId64": %d",
-                      filename, opts->size, rc);
+        if (rc != 0)
+        {
+            error_setg(errp, "Failed to truncate file %s to size %" PRId64 ": %d",
+                       filename, opts->size, rc);
             goto cleanup;
         }
 
         // Sync after truncate to ensure durability
         rc = dfs_sync(dfs);
-        if (rc != 0) {
+        if (rc != 0)
+        {
             error_setg(errp, "Failed to sync file after truncate: %d", rc);
             goto cleanup;
         }
@@ -926,15 +1079,18 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options,
     rc = 0; // Success
 
 cleanup:
-    if (file) {
+    if (file)
+    {
         dfs_release(file);
         file = NULL;
     }
-    if (namespace) {
+    if (namespace)
+    {
         dfs_release(namespace);
-        namespace = NULL; 
+        namespace = NULL;
     }
-    if (dfs) {
+    if (dfs)
+    {
         dfs_disconnect(dfs);
         dfs = NULL;
     }
@@ -954,6 +1110,7 @@ cleanup:
  */
 static int qemu_dfs_co_create(BlockdevCreateOptions *options, Error **errp)
 {
+    qemu_dfs_do_create2(options, NULL, NULL, errp);
     return qemu_dfs_do_create(options, NULL, NULL, errp);
 }
 
