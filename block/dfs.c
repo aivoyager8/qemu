@@ -31,7 +31,21 @@
 #include "daos.h"
 #include "daos_fs.h"
 
-#define DEFAULT_NS "xblock" // 默认的数据目录名称
+#define DEFAULT_NS "xblock"                       // 默认的数据目录名称
+#define DFS_MAX_CHUNK_SIZE (128ULL * 1024 * 1024) /* 128MB */
+#define DFS_MIN_FSIZE DFS_MAX_CHUNK_SIZE          /* 128MB */
+#define DFS_DEFAULT_CONT_OCLASS 0
+
+// Object class IDs for file creation, with single copies as default
+static daos_oclass_id_t ObjectClassTable[] = {
+    OC_UNKNOWN, // Default object class
+    OC_SX,      // Single copy with XOR
+    OC_RP_2GX,  // 2-way replication with XOR
+    OC_RP_3GX,  // 3-way replication with XOR
+    OC_RP_4GX,  // 4-way replication with XOR
+    OC_RP_5GX,  // 8-way replication with XOR
+    OC_RP_6GX,  // 12-way replication with XOR
+};
 
 /**
  * When specifying the image filename use:
@@ -72,19 +86,22 @@ typedef struct BDRVDFSState
 static char *qemu_dfs_next_tok(char *src, char delim, char **p)
 {
     /* Validate input parameters */
-    if (!p) {
+    if (!p)
+    {
         return NULL;
     }
 
     *p = NULL;
 
-    if (!src) {
+    if (!src)
+    {
         return NULL;
     }
 
     /* Find delimiter and split string */
     char *end = strchr(src, delim);
-    if (end) {
+    if (end)
+    {
         /* Only modify the string if we found the delimiter */
         *end = '\0';
         *p = end + 1;
@@ -125,74 +142,86 @@ static void qemu_dfs_parse_filename(const char *filename, QDict *options, Error 
     char *buf = NULL;
     const char *start;
     char *next_ptr = NULL;
-    char *pool_name = NULL; 
+    char *pool_name = NULL;
     char *container_name = NULL;
     char *file_name = NULL;
 
     /* Validate input parameters */
-    if (!filename || !options || !errp) {
+    if (!filename || !options || !errp)
+    {
         error_setg(errp, "Invalid parameters");
         return;
     }
 
     /* Check prefix */
-    if (!strstart(filename, "dfs:", &start)) {
+    if (!strstart(filename, "dfs:", &start))
+    {
         error_setg(errp, "Filename must start with 'dfs:'");
         return;
     }
 
     /* Skip empty path after prefix */
-    if (!*start) {
+    if (!*start)
+    {
         error_setg(errp, "Empty path after dfs: prefix");
         return;
     }
 
     /* Duplicate string for tokenization */
     buf = g_strdup(start);
-    if (!buf) {
+    if (!buf)
+    {
         error_setg(errp, "Memory allocation failed");
         return;
     }
 
     /* Parse pool name */
     pool_name = qemu_dfs_next_tok(buf, '/', &next_ptr);
-    if (!pool_name || !*pool_name) {
+    if (!pool_name || !*pool_name)
+    {
         error_setg(errp, "Pool name must be specified");
         goto cleanup;
     }
 
     /* Parse container name */
     container_name = qemu_dfs_next_tok(next_ptr, '/', &next_ptr);
-    if (!container_name || !*container_name) {
+    if (!container_name || !*container_name)
+    {
         error_setg(errp, "Container name must be specified");
         goto cleanup;
     }
 
     /* Parse file name - everything after the second slash */
     file_name = next_ptr;
-    if (!file_name || !*file_name) {
+    if (!file_name || !*file_name)
+    {
         error_setg(errp, "File name must be specified");
         goto cleanup;
     }
 
     /* Store values in options dictionary */
-    if (!qdict_haskey(options, "pool")) {
+    if (!qdict_haskey(options, "pool"))
+    {
         qdict_put_str(options, "pool", pool_name);
     }
-    if (!qdict_haskey(options, "container")) {
+    if (!qdict_haskey(options, "container"))
+    {
         qdict_put_str(options, "container", container_name);
     }
-    if (!qdict_haskey(options, "dfilename")) {
+    if (!qdict_haskey(options, "dfilename"))
+    {
         qdict_put_str(options, "dfilename", file_name);
     }
-    if (!qdict_haskey(options, "filename")) {
+    if (!qdict_haskey(options, "filename"))
+    {
         qdict_put_str(options, "filename", filename);
     }
 
     /* Verify all required options are present */
     if (!qdict_get_try_str(options, "pool") ||
         !qdict_get_try_str(options, "container") ||
-        !qdict_get_try_str(options, "dfilename")) {
+        !qdict_get_try_str(options, "dfilename"))
+    {
         error_setg(errp, "Failed to store required options");
         goto cleanup;
     }
@@ -251,12 +280,14 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
     Error *local_err = NULL;
     const QDictEntry *e;
 
-    if (!bs || !options || !errp) {
+    if (!bs || !options || !errp)
+    {
         return -EINVAL;
     }
 
     s = bs->opaque;
-    if (!s) {
+    if (!s)
+    {
         error_setg(errp, "Invalid block driver state");
         return -EINVAL;
     }
@@ -271,14 +302,17 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
 
     // Convert options and validate
     rc = qemu_dfs_convert_options(options, &opts, &local_err);
-    if (rc || local_err) {
-        if (local_err) {
+    if (rc || local_err)
+    {
+        if (local_err)
+        {
             error_propagate(errp, local_err);
         }
         return rc ? rc : -EINVAL;
     }
 
-    if (!opts || !opts->pool || !opts->container || !opts->dfilename) {
+    if (!opts || !opts->pool || !opts->container || !opts->dfilename)
+    {
         error_setg(errp, "Missing required options (pool, container, or filename)");
         rc = -EINVAL;
         goto err;
@@ -289,30 +323,35 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
     s->container_name = g_strdup(opts->container);
     s->file_name = g_strdup(opts->dfilename);
 
-    if (!s->pool_name || !s->container_name || !s->file_name) {
+    if (!s->pool_name || !s->container_name || !s->file_name)
+    {
         error_setg(errp, "Failed to allocate path strings");
         rc = -ENOMEM;
         goto err;
     }
 
     // Clear processed options safely
-    if (options) {
-        while ((e = qdict_first(options))) {
+    if (options)
+    {
+        while ((e = qdict_first(options)))
+        {
             qdict_del(options, e->key);
         }
     }
 
     // Initialize DFS subsystem
     rc = dfs_init();
-    if (rc) {
+    if (rc)
+    {
         error_setg(errp, "Failed to initialize DFS: %d", rc);
         goto err;
     }
 
     // Connect to DFS pool/container
-    rc = dfs_connect(s->pool_name, NULL, s->container_name, 
+    rc = dfs_connect(s->pool_name, NULL, s->container_name,
                      O_CREAT | O_RDWR, NULL, &s->dfs);
-    if (rc || !s->dfs) {
+    if (rc || !s->dfs)
+    {
         error_setg(errp, "Failed to connect to pool %s container %s: %d",
                    s->pool_name, s->container_name, rc);
         goto err;
@@ -320,22 +359,24 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
 
     // Open/create default namespace
     rc = dfs_open(s->dfs, NULL, DEFAULT_NS,
-                  S_IWUSR | S_IRUSR | S_IFDIR,  // Mode
-                  O_RDWR,             // Flags
+                  S_IWUSR | S_IRUSR | S_IFDIR, // Mode
+                  O_RDWR,                      // Flags
                   0, 0, NULL, &s->namespace);
-    if (rc || !s->namespace) {
-        error_setg(errp, "Failed to open namespace %s: %d", 
+    if (rc || !s->namespace)
+    {
+        error_setg(errp, "Failed to open namespace %s: %d",
                    DEFAULT_NS, rc);
         goto err;
     }
 
     // Open/create file within namespace
     rc = dfs_open(s->dfs, s->namespace, s->file_name,
-                  S_IWUSR | S_IRUSR | S_IFREG,  // Mode 
-                  O_RDWR,                        // Flags - removed O_CREAT
+                  S_IWUSR | S_IRUSR | S_IFREG, // Mode
+                  O_RDWR,                      // Flags - removed O_CREAT
                   0, 0, NULL, &s->file);
-    if (rc || !s->file) {
-        error_setg(errp, "Failed to open file %s: %d", 
+    if (rc || !s->file)
+    {
+        error_setg(errp, "Failed to open file %s: %d",
                    s->file_name, rc);
         goto err;
     }
@@ -345,33 +386,37 @@ static int qemu_dfs_open(BlockDriverState *bs, QDict *options, int flags,
 
 err:
     // Clean up in reverse order of creation
-    if (s->file) {
+    if (s->file)
+    {
         dfs_release(s->file);
         s->file = NULL;
     }
-    
-    if (s->namespace) {
+
+    if (s->namespace)
+    {
         dfs_release(s->namespace);
         s->namespace = NULL;
     }
-    
-    if (s->dfs) {
+
+    if (s->dfs)
+    {
         dfs_disconnect(s->dfs);
         s->dfs = NULL;
         dfs_fini(); // Clean up DFS subsystem
     }
 
     g_free(s->file_name);
-    g_free(s->container_name); 
+    g_free(s->container_name);
     g_free(s->pool_name);
     s->file_name = NULL;
     s->container_name = NULL;
     s->pool_name = NULL;
 
-    if (opts) {
+    if (opts)
+    {
         qapi_free_BlockdevOptionsDFS(opts);
     }
-    
+
     return rc ? rc : -EIO;
 }
 
@@ -420,7 +465,7 @@ static void qemu_dfs_close(BlockDriverState *bs)
 
 /**
  * Converts a QEMU I/O vector to a DFS scatter-gather list.
- * 
+ *
  * @param qiov      Source QEMU I/O vector to convert
  * @param sg_list   Target DFS scatter-gather list to populate
  *
@@ -433,11 +478,13 @@ static int qiov_to_sg_list(const QEMUIOVector *qiov, d_sg_list_t *sg_list)
     int ret = 0;
     uint64_t total_size = 0;
 
-    if (!qiov || !sg_list) {
+    if (!qiov || !sg_list)
+    {
         return -EINVAL;
     }
 
-    if (qiov->niov == 0 || !qiov->iov) {
+    if (qiov->niov == 0 || !qiov->iov)
+    {
         return -EINVAL;
     }
 
@@ -445,25 +492,30 @@ static int qiov_to_sg_list(const QEMUIOVector *qiov, d_sg_list_t *sg_list)
     memset(sg_list, 0, sizeof(*sg_list));
 
     /* Calculate total size and validate iov entries */
-    for (int i = 0; i < qiov->niov; i++) {
-        if (!qiov->iov[i].iov_base && qiov->iov[i].iov_len > 0) {
+    for (int i = 0; i < qiov->niov; i++)
+    {
+        if (!qiov->iov[i].iov_base && qiov->iov[i].iov_len > 0)
+        {
             return -EINVAL;
         }
-        
+
         /* Check for overflow */
-        if (total_size + qiov->iov[i].iov_len < total_size) {
+        if (total_size + qiov->iov[i].iov_len < total_size)
+        {
             return -EOVERFLOW;
         }
         total_size += qiov->iov[i].iov_len;
     }
 
-    if (total_size == 0) {
+    if (total_size == 0)
+    {
         return -EINVAL;
     }
 
     /* Allocate sg_iovs array */
     sg_list->sg_iovs = calloc(qiov->niov, sizeof(*sg_list->sg_iovs));
-    if (!sg_list->sg_iovs) {
+    if (!sg_list->sg_iovs)
+    {
         return -ENOMEM;
     }
 
@@ -471,7 +523,8 @@ static int qiov_to_sg_list(const QEMUIOVector *qiov, d_sg_list_t *sg_list)
     sg_list->sg_nr = qiov->niov;
     sg_list->sg_nr_out = 0;
 
-    for (int i = 0; i < qiov->niov; i++) {
+    for (int i = 0; i < qiov->niov; i++)
+    {
         sg_list->sg_iovs[i].iov_buf = qiov->iov[i].iov_base;
         sg_list->sg_iovs[i].iov_buf_len = qiov->iov[i].iov_len;
         sg_list->sg_iovs[i].iov_len = qiov->iov[i].iov_len;
@@ -496,7 +549,7 @@ static int qiov_to_sg_list(const QEMUIOVector *qiov, d_sg_list_t *sg_list)
  */
 static int coroutine_fn qemu_dfs_co_preadv(BlockDriverState *bs,
                                            int64_t offset, int64_t bytes,
-                                           QEMUIOVector *qiov, 
+                                           QEMUIOVector *qiov,
                                            BdrvRequestFlags flags)
 {
     int rc = 0;
@@ -505,46 +558,53 @@ static int coroutine_fn qemu_dfs_co_preadv(BlockDriverState *bs,
     d_sg_list_t sgl = {0};
 
     /* Parameter validation */
-    if (!bs || !qiov) {
+    if (!bs || !qiov)
+    {
         return -EINVAL;
     }
 
     s = bs->opaque;
-    if (!s || !s->dfs || !s->file) {
+    if (!s || !s->dfs || !s->file)
+    {
         return -ENOENT;
     }
 
     /* Validate offset and size */
-    if (offset < 0 || bytes < 0) {
+    if (offset < 0 || bytes < 0)
+    {
         return -EINVAL;
     }
 
     /* Verify qiov size matches bytes requested */
-    if (qiov->size != bytes) {
+    if (qiov->size != bytes)
+    {
         return -EINVAL;
     }
 
     /* Convert QEMU I/O vector to DFS scatter-gather list */
     rc = qiov_to_sg_list(qiov, &sgl);
-    if (rc) {
+    if (rc)
+    {
         error_setg(&error_abort, "Failed to convert I/O vector: %d", rc);
         return rc;
     }
 
     /* Read from file */
     rc = dfs_read(s->dfs, s->file, &sgl, offset, &read_size, NULL);
-    if (rc) {
-        error_setg(&error_abort, "DFS read failed (rc=%d): %s", 
-                  rc, strerror(abs(rc)));
+    if (rc)
+    {
+        error_setg(&error_abort, "DFS read failed (rc=%d): %s",
+                   rc, strerror(abs(rc)));
         free(sgl.sg_iovs);
         return rc;
     }
 
     /* Check if we read the expected amount */
-    if (read_size != bytes) {
+    if (read_size != bytes)
+    {
         /* Not necessarily an error - could be EOF */
-        info_report("Partial read: expected %"PRId64" bytes, got %zu", 
-                   bytes, read_size); 
+        info_report("Partial read: expected %" PRId64 " bytes, got %zu",
+                    bytes, read_size);
     }
 
     free(sgl.sg_iovs);
@@ -576,45 +636,52 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
     d_sg_list_t sgl = {0};
 
     /* Parameter validation */
-    if (!bs || !qiov) {
+    if (!bs || !qiov)
+    {
         return -EINVAL;
     }
 
     s = bs->opaque;
-    if (!s || !s->dfs || !s->file) {
+    if (!s || !s->dfs || !s->file)
+    {
         return -ENOENT;
     }
 
     /* Validate offset and size */
-    if (offset < 0 || bytes < 0) {
+    if (offset < 0 || bytes < 0)
+    {
         return -EINVAL;
     }
 
     /* Verify qiov size matches bytes requested */
-    if (qiov->size != bytes) {
+    if (qiov->size != bytes)
+    {
         return -EINVAL;
     }
 
     /* Convert QEMU I/O vector to DFS scatter-gather list */
     rc = qiov_to_sg_list(qiov, &sgl);
-    if (rc) {
+    if (rc)
+    {
         error_setg(&error_abort, "Failed to convert I/O vector: %d", rc);
         return rc;
     }
 
     /* Write to file */
     rc = dfs_write(s->dfs, s->file, &sgl, offset, NULL);
-    if (rc) {
+    if (rc)
+    {
         error_setg(&error_abort, "DFS write failed (rc=%d): %s",
-                  rc, strerror(abs(rc)));
+                   rc, strerror(abs(rc)));
         free(sgl.sg_iovs);
         return rc;
     }
 
     /* Check if we wrote the expected amount */
-    if (written_size != bytes) {
-        error_setg(&error_abort, "Partial write: expected %"PRId64" bytes, wrote %zu",
-                  bytes, written_size);
+    if (written_size != bytes)
+    {
+        error_setg(&error_abort, "Partial write: expected %" PRId64 " bytes, wrote %zu",
+                   bytes, written_size);
         free(sgl.sg_iovs);
         return -EIO;
     }
@@ -639,31 +706,36 @@ static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
     daos_size_t size;
 
     /* Parameter validation */
-    if (!bs) {
+    if (!bs)
+    {
         error_setg(&error_abort, "Invalid block driver state");
-        return -EINVAL; 
+        return -EINVAL;
     }
 
     s = bs->opaque;
-    if (!s) {
+    if (!s)
+    {
         error_setg(&error_abort, "Invalid block driver opaque state");
         return -EINVAL;
     }
 
-    if (!s->dfs || !s->file) {
+    if (!s->dfs || !s->file)
+    {
         error_setg(&error_abort, "DFS file not open");
         return -ENOENT;
     }
 
     /* Get file size */
     rc = dfs_get_size(s->dfs, s->file, &size);
-    if (rc) {
+    if (rc)
+    {
         error_setg(&error_abort, "Failed to get DFS file size: %d", rc);
         return rc;
     }
 
     /* Check for valid size */
-    if (size > INT64_MAX) {
+    if (size > INT64_MAX)
+    {
         error_setg(&error_abort, "Invalid file size: %zu", size);
         return -EOVERFLOW;
     }
@@ -687,7 +759,7 @@ static int64_t coroutine_fn qemu_dfs_co_getlength(BlockDriverState *bs)
  * Truncates a DFS file to the specified size.
  *
  * @param dfs     DFS filesystem handle
- * @param file    DFS file object handle 
+ * @param file    DFS file object handle
  * @param offset  New size for the file
  * @param errp    Error object for reporting errors
  *
@@ -701,40 +773,46 @@ static int qemu_dfs_do_truncate(dfs_t *dfs, dfs_obj_t *file, int64_t offset, Err
     int rc;
 
     /* Validate input parameters */
-    if (!errp) {
+    if (!errp)
+    {
         return -EINVAL;
     }
 
-    if (!dfs || !file) {
+    if (!dfs || !file)
+    {
         error_setg(errp, "Invalid DFS handle or file object");
         return -ENOENT;
     }
 
     /* Validate offset */
-    if (offset < 0) {
-        error_setg(errp, "Invalid negative offset: %"PRId64, offset);
+    if (offset < 0)
+    {
+        error_setg(errp, "Invalid negative offset: %" PRId64, offset);
         return -EINVAL;
     }
 
     /* Check for overflow */
-    if (offset > DFS_MAX_FSIZE) {
-        error_setg(errp, "Offset %"PRId64" exceeds maximum file size", offset);
+    if (offset > DFS_MAX_FSIZE)
+    {
+        error_setg(errp, "Offset %" PRId64 " exceeds maximum file size", offset);
         return -EFBIG;
     }
 
     /* Attempt to truncate the file */
     rc = dfs_punch(dfs, file, offset, DFS_MAX_FSIZE);
-    if (rc != 0) {
-        error_setg(errp, "Failed to truncate file (rc=%d): %s", 
-                  rc, strerror(abs(rc)));
+    if (rc != 0)
+    {
+        error_setg(errp, "Failed to truncate file (rc=%d): %s",
+                   rc, strerror(abs(rc)));
         return rc;
     }
 
     /* Sync changes to ensure durability */
     rc = dfs_sync(dfs);
-    if (rc != 0) {
+    if (rc != 0)
+    {
         error_setg(errp, "Failed to sync file after truncate (rc=%d): %s",
-                  rc, strerror(abs(rc)));
+                   rc, strerror(abs(rc)));
         return rc;
     }
 
@@ -764,37 +842,43 @@ static int coroutine_fn qemu_dfs_co_truncate(BlockDriverState *bs,
     int rc;
     BDRVDFSState *s;
 
-    if (!bs) {
+    if (!bs)
+    {
         error_setg(errp, "Invalid block driver state");
         return -EINVAL;
     }
 
     s = bs->opaque;
-    if (!s) {
+    if (!s)
+    {
         error_setg(errp, "Invalid block driver opaque state");
         return -EINVAL;
     }
 
-    if (!s->dfs || !s->file) {
+    if (!s->dfs || !s->file)
+    {
         error_setg(errp, "DFS file not open");
         return -ENOENT;
     }
 
     /* Validate offset */
-    if (offset < 0) {
-        error_setg(errp, "Invalid negative offset: %"PRId64, offset);
+    if (offset < 0)
+    {
+        error_setg(errp, "Invalid negative offset: %" PRId64, offset);
         return -EINVAL;
     }
 
     /* Check if exact size is required but preallocation is also requested */
-    if (exact && prealloc != PREALLOC_MODE_OFF) {
+    if (exact && prealloc != PREALLOC_MODE_OFF)
+    {
         error_setg(errp, "Cannot combine exact size with preallocation");
         return -EINVAL;
     }
 
     /* Truncate file with validated parameters */
     rc = qemu_dfs_do_truncate(s->dfs, s->file, offset, errp);
-    if (rc) {
+    if (rc)
+    {
         /* Error already set by qemu_dfs_do_truncate */
         return rc;
     }
@@ -812,16 +896,15 @@ static int coroutine_fn qemu_dfs_co_truncate(BlockDriverState *bs,
  *
  * @return 0 on success, negative errno on failure
  */
-static int qemu_dfs_do_create(BlockdevCreateOptions *options,
-                              const char *keypairs,
-                              const char *password_secret,
-                              Error **errp)
+static int qemu_dfs_do_create(BlockdevCreateOptions *options, Error **errp)
 {
     int rc = -EINVAL;
     dfs_t *dfs = NULL;
     dfs_obj_t *namespace = NULL;
     dfs_obj_t *file = NULL;
     uint64_t chunk_size = 0; // default chunk size 1MB
+    dfs_attr_t attr = {0};
+    daos_oclass_id_t oclass = 0; // Default object class
 
     // Parameter validation
     if (!options || !errp)
@@ -853,15 +936,27 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options,
         return -EINVAL;
     }
 
+    // Set replica count if provided
+    if (opts->has_replica)
+    {
+        oclass = ObjectClassTable[opts->replica];
+    }
+
     // Set chunk size if provided
     if (opts->has_chunk_size)
     {
         chunk_size = opts->chunk_size;
     }
 
+    // Set object class for group replicas if provided
+    attr.da_oclass_id = DFS_DEFAULT_CONT_OCLASS;
+    if (opts->has_group_replica)
+    {
+        attr.da_oclass_id = ObjectClassTable[opts->group_replica];
+    }
+
     info_report("DFS Create: pool=%s container=%s file=%s chunk_size=%lu",
                 pool, container, filename, chunk_size);
-
 
     // Initialize DFS
     rc = dfs_init();
@@ -872,7 +967,7 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options,
     }
 
     // Connect to DFS
-    rc = dfs_connect(pool, NULL, container, O_CREAT | O_RDWR, NULL, &dfs);
+    rc = dfs_connect(pool, NULL, container, O_CREAT | O_RDWR, &attr, &dfs);
     if (rc != 0 || !dfs)
     {
         error_setg(errp, "Failed to connect to pool %s container %s: %d",
@@ -881,10 +976,8 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options,
     }
 
     // Create/open namespace
-    rc = dfs_open(dfs, NULL, DEFAULT_NS,
-                  S_IWUSR | S_IRUSR | S_IFDIR, // Mode
-                  O_RDWR | O_CREAT,            // Flags
-                  0, 0, NULL, &namespace);
+    rc = dfs_open(dfs, NULL, DEFAULT_NS, S_IWUSR | S_IRUSR | S_IFDIR, // Mode
+                  O_RDWR | O_CREAT, 0, 0, NULL, &namespace);
     if (rc != 0 || !namespace)
     {
         error_setg(errp, "Failed to open namespace %s: %d", DEFAULT_NS, rc);
@@ -892,10 +985,8 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options,
     }
 
     // Create file with exclusive flag
-    rc = dfs_open(dfs, namespace, filename,
-                  S_IWUSR | S_IRUSR | S_IFREG, // Mode
-                  O_RDWR | O_CREAT | O_EXCL,   // Flags
-                  0, 0, NULL, &file);
+    rc = dfs_open(dfs, namespace, filename, S_IWUSR | S_IRUSR | S_IFREG, // Mode
+                  O_RDWR | O_CREAT | O_EXCL, oclass, chunk_size, NULL, &file);
     if (rc != 0 || !file)
     {
         error_setg(errp, "Failed to create file %s: %d", filename, rc);
@@ -956,7 +1047,7 @@ cleanup:
  */
 static int qemu_dfs_co_create(BlockdevCreateOptions *options, Error **errp)
 {
-    return qemu_dfs_do_create(options, NULL, NULL, errp);
+    return qemu_dfs_do_create(options, errp);
 }
 
 /**
@@ -973,7 +1064,111 @@ static QemuOptsList qemu_dfs_create_opts = {
         {.name = BLOCK_OPT_OBJECT_SIZE,
          .type = QEMU_OPT_SIZE,
          .help = "DFS chunk size"},
+        {.name = "group_replicas",
+         .type = QEMU_OPT_NUMBER,
+         .help = "Number of group replicas"},
+        {.name = "replicas",
+         .type = QEMU_OPT_NUMBER,
+         .help = "Number of object replicas"},
+        {.name = "compression",
+         .type = QEMU_OPT_BOOL,
+         .help = "Enable compression for the disk image"},
+        {.name = "dedup",
+         .type = QEMU_OPT_BOOL,
+         .help = "Enable data deduplication for the disk image"},
     }};
+
+/**
+ * Parses the filename and extracts the encryption options for a new DFS file.
+ *
+ * @param filename  Path to the DFS file to create
+ * @param opts      Pointer to QDict to store the parsed options
+ * @param errp      Error object to store any error that occurs
+ *
+ * @return 0 on success, negative errno on failure
+ */
+static int validate_dfs_options(BlockdevCreateOptionsDFS *dfs_opts, Error **errp)
+{
+    // 验证文件大小
+    if (dfs_opts->size > DFS_MAX_FSIZE)
+    {
+        error_setg(errp, "File size %" PRIu64 " exceeds maximum allowed size (256TB)",
+                   dfs_opts->size);
+        return -EFBIG;
+    }
+    if (dfs_opts->size < DFS_MIN_FSIZE)
+    {
+        error_setg(errp, "File size %" PRIu64 " is below minimum allowed size (128MB)",
+                   dfs_opts->size);
+        return -EINVAL;
+    }
+
+    // 验证块大小
+    if (dfs_opts->has_chunk_size && dfs_opts->chunk_size > DFS_MAX_CHUNK_SIZE)
+    {
+        error_setg(errp, "Chunk size %" PRIu64 " exceeds maximum allowed (0-128MB)",
+                   dfs_opts->chunk_size);
+        return -EINVAL;
+    }
+
+    // 验证副本数量
+    if (dfs_opts->replica < 1 || dfs_opts->replica > 6)
+    {
+        error_setg(errp, "Replica count %d must be between 1 and 6",
+                   dfs_opts->replica);
+        return -EINVAL;
+    }
+
+    // 验证组副本数量
+    if (dfs_opts->group_replica < 1 || dfs_opts->group_replica > 6)
+    {
+        error_setg(errp, "Group replica count %d must be between 1 and 6",
+                   dfs_opts->group_replica);
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+/**
+ * Validates the creation options for a DFS-formatted block device.
+ *
+ * @param dfs_opts Pointer to DFS block device creation options structure
+ * @param errp     Error object pointer for reporting validation errors
+ *
+ * @return 0 on success, negative errno on failure
+ */
+static int parse_dfs_options(QemuOpts *opts, BlockdevCreateOptionsDFS *dfs_opts,
+                             Error **errp)
+{
+    // 设置基本选项
+    dfs_opts->size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                              BDRV_SECTOR_SIZE);
+
+    dfs_opts->chunk_size = qemu_opt_get_size_del(opts, BLOCK_OPT_OBJECT_SIZE, 0);
+    dfs_opts->has_chunk_size = (dfs_opts->chunk_size != 0);
+
+    dfs_opts->replica = qemu_opt_get_number_del(opts, "replicas", 0);
+    if (dfs_opts->replica > 0)
+    {
+        dfs_opts->has_replica = true;
+    }
+
+    dfs_opts->group_replica = qemu_opt_get_number_del(opts, "group_replicas", 0);
+    if (dfs_opts->group_replica > 0)
+    {
+        dfs_opts->has_group_replica = true;
+    }
+
+    dfs_opts->compress = qemu_opt_get_bool_del(opts, "compression", false);
+    dfs_opts->has_compress = true;
+
+    dfs_opts->dedup = qemu_opt_get_bool_del(opts, "dedup", false);
+    dfs_opts->has_dedup = true;
+
+    // 验证选项
+    return validate_dfs_options(dfs_opts, errp);
+}
 
 // /**
 //  * Creates a new disk image with specified options using DFS (Distributed File System).
@@ -997,7 +1192,7 @@ static int coroutine_fn qemu_dfs_co_create_opts(BlockDriver *drv,
     BlockdevCreateOptionsDFS *dfs_opts;
     BlockdevOptionsDFS *loc;
     QDict *options = NULL;
-    int ret = -EINVAL;
+    int rc = -EINVAL;
     const char *pool, *container, *dfilename;
 
     create_options = g_new0(BlockdevCreateOptions, 1);
@@ -1014,20 +1209,22 @@ static int coroutine_fn qemu_dfs_co_create_opts(BlockDriver *drv,
     if (!dfs_opts->location)
     {
         error_setg(errp, "Failed to allocate location options");
-        ret = -ENOMEM;
+        rc = -ENOMEM;
         goto exit;
     }
 
-    dfs_opts->size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
-                              BDRV_SECTOR_SIZE);
-    dfs_opts->chunk_size = qemu_opt_get_size_del(opts, BLOCK_OPT_OBJECT_SIZE, 0);
-    dfs_opts->has_chunk_size = (dfs_opts->chunk_size != 0);
+    /* Parse options into dfs_opts structure */
+    rc = parse_dfs_options(opts, dfs_opts, errp);
+    if (rc < 0)
+    {
+        goto exit;
+    }
 
     options = qdict_new();
     if (!options)
     {
         error_setg(errp, "Failed to allocate options dictionary");
-        ret = -ENOMEM;
+        rc = -ENOMEM;
         goto exit;
     }
 
@@ -1055,16 +1252,16 @@ static int coroutine_fn qemu_dfs_co_create_opts(BlockDriver *drv,
     if (!loc->pool || !loc->container || !loc->dfilename)
     {
         error_setg(errp, "Failed to allocate strings for location");
-        ret = -ENOMEM;
+        rc = -ENOMEM;
         goto exit;
     }
 
-    ret = qemu_dfs_do_create(create_options, NULL, NULL, errp);
+    rc = qemu_dfs_do_create(create_options, errp);
 
 exit:
     qobject_unref(options);
     qapi_free_BlockdevCreateOptions(create_options);
-    return ret;
+    return rc;
 }
 
 /**
@@ -1074,16 +1271,14 @@ static const char *const qemu_dfs_runtime_opts[] = {
     "pool",
     "container",
     "dfilename",
-    NULL
-};
-
+    NULL};
 
 /**
  * Flushes the RBD (RADOS Block Device) block driver state.
- * 
+ *
  * This coroutine function ensures all pending writes are committed to storage
  * for the given block device state.
- * 
+ *
  * @param bs    Pointer to the block driver state
  * @return      0 on success, negative errno on failure
  */
@@ -1093,21 +1288,24 @@ static int coroutine_fn qemu_dfs_co_flush(BlockDriverState *bs)
     BDRVDFSState *s;
 
     /* Parameter validation */
-    if (!bs) {
+    if (!bs)
+    {
         return -EINVAL;
     }
 
     s = bs->opaque;
-    if (!s || !s->dfs || !s->file) {
+    if (!s || !s->dfs || !s->file)
+    {
         error_setg(&error_abort, "Invalid DFS state");
         return -ENOENT;
     }
 
     /* Sync file first for file-level durability */
-    rc = dfs_sync(s->dfs); 
-    if (rc) {
+    rc = dfs_sync(s->dfs);
+    if (rc)
+    {
         error_setg(&error_abort, "DFS sync failed (rc=%d): %s",
-                  rc, strerror(abs(rc)));
+                   rc, strerror(abs(rc)));
         return rc;
     }
 
@@ -1132,46 +1330,52 @@ static int coroutine_fn qemu_dfs_co_pdiscard(BlockDriverState *bs,
     int rc;
 
     /* Fast path validation */
-    if (!bs || offset < 0 || bytes <= 0) {
+    if (!bs || offset < 0 || bytes <= 0)
+    {
         return -EINVAL;
     }
 
     s = bs->opaque;
-    if (!s || !s->dfs || !s->file) {
-        return -ENOENT; 
+    if (!s || !s->dfs || !s->file)
+    {
+        return -ENOENT;
     }
 
     /* Check for overflow */
-    if (offset + bytes < offset) {
+    if (offset + bytes < offset)
+    {
         return -EINVAL;
     }
 
     /* Get current file size */
     rc = dfs_get_size(s->dfs, s->file, &size);
-    if (rc) {
+    if (rc)
+    {
         return rc;
     }
 
     /* Fast path - nothing to discard if beyond EOF */
-    if (offset >= size) {
+    if (offset >= size)
+    {
         return 0;
     }
 
     /* Adjust bytes if needed */
-    if (offset + bytes > size) {
+    if (offset + bytes > size)
+    {
         bytes = size - offset;
     }
 
     /* Perform discard */
     rc = dfs_punch(s->dfs, s->file, offset, bytes);
-    if (rc) {
+    if (rc)
+    {
         return rc;
     }
 
     /* Ensure durability */
     return dfs_sync(s->dfs);
 }
-
 
 /**
  * Block driver definition for DFS (Distributed File System).

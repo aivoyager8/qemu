@@ -5185,9 +5185,10 @@
   'data': { 'location':         'BlockdevOptionsDFS',
             'size':             'size',
             '*chunk-size':      'size',
-            '*dedupe': 'bool',
+            '*dedup': 'bool',
             '*compress': 'bool',
-            '*replica': 'uint8'} }
+            '*replica': 'uint8',
+            '*group-replica': 'uint8'} }
 
 
 ##
