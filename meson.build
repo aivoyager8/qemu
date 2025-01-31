@@ -1297,8 +1297,9 @@ endif
 
 
 libdaos = cc.find_library('daos')
+libdaos_common = cc.find_library('daos_common')
 libdfs = cc.find_library('dfs')
-dfs = declare_dependency(dependencies: [libdaos, libdfs])
+dfs = declare_dependency(dependencies: [libdaos, libdaos_common, libdfs])
 
 glusterfs = not_found
 glusterfs_ftruncate_has_stat = false

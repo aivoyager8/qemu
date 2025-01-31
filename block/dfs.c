@@ -955,6 +955,28 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options, Error **errp)
         attr.da_oclass_id = ObjectClassTable[opts->group_replica];
     }
 
+    // Set compression and deduplication properties if provided
+    attr.da_props = daos_prop_alloc(2);
+    if (!attr.da_props)
+    {
+        error_setg(errp, "Failed to allocate properties");
+        return -ENOMEM;
+    }
+
+    // Compression
+    if (opts->compress)
+    {
+        attr.da_props->dpp_entries[0].dpe_type = DAOS_PROP_CO_COMPRESS;
+        attr.da_props->dpp_entries[0].dpe_val = DAOS_PROP_CO_COMPRESS_LZ4;
+    }
+
+    // Deduplication
+    if (opts->dedup)
+    {
+        attr.da_props->dpp_entries[1].dpe_type = DAOS_PROP_CO_DEDUP;
+        attr.da_props->dpp_entries[1].dpe_val = DAOS_PROP_CO_DEDUP_HASH;
+    }
+
     info_report("DFS Create: pool=%s container=%s file=%s chunk_size=%lu",
                 pool, container, filename, chunk_size);
 
@@ -963,7 +985,7 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options, Error **errp)
     if (rc != 0)
     {
         error_setg(errp, "Failed to initialize DFS: %d", rc);
-        return rc;
+        goto cleanup;
     }
 
     // Connect to DFS
@@ -1016,6 +1038,11 @@ static int qemu_dfs_do_create(BlockdevCreateOptions *options, Error **errp)
     rc = 0; // Success
 
 cleanup:
+    if (attr.da_props)
+    {
+        daos_prop_free(attr.da_props);
+    }
+
     if (file)
     {
         dfs_release(file);
@@ -1112,7 +1139,7 @@ static int validate_dfs_options(BlockdevCreateOptionsDFS *dfs_opts, Error **errp
     }
 
     // 验证副本数量
-    if (dfs_opts->replica < 1 || dfs_opts->replica > 6)
+    if (dfs_opts->has_replica && (dfs_opts->replica < 1 || dfs_opts->replica > 6))
     {
         error_setg(errp, "Replica count %d must be between 1 and 6",
                    dfs_opts->replica);
@@ -1161,10 +1188,7 @@ static int parse_dfs_options(QemuOpts *opts, BlockdevCreateOptionsDFS *dfs_opts,
     }
 
     dfs_opts->compress = qemu_opt_get_bool_del(opts, "compression", false);
-    dfs_opts->has_compress = true;
-
     dfs_opts->dedup = qemu_opt_get_bool_del(opts, "dedup", false);
-    dfs_opts->has_dedup = true;
 
     // 验证选项
     return validate_dfs_options(dfs_opts, errp);
@@ -1256,7 +1280,13 @@ static int coroutine_fn qemu_dfs_co_create_opts(BlockDriver *drv,
         goto exit;
     }
 
+    // Validate and create the DFS file
     rc = qemu_dfs_do_create(create_options, errp);
+    if (rc < 0)
+    {
+        error_setg(errp, "Failed to create DFS file: %d", rc);
+        goto exit;
+    }
 
 exit:
     qobject_unref(options);
