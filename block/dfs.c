@@ -618,8 +618,6 @@ static int coroutine_fn qemu_dfs_co_preadv(BlockDriverState *bs,
  * \param[in]	obj	Opened file object.
  * \param[in]	sgl	Scatter/Gather list for data buffer.
  * \param[in]	off	Offset into the file to write to.
- * \param[out]	written_size
- *			How much data is actually written.
  * \param[in]	ev	Completion event, it is optional and can be NULL.
  *			Function will run in blocking mode if \a ev is NULL.
  *
@@ -632,7 +630,6 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
 {
     int rc = 0;
     BDRVDFSState *s;
-    daos_size_t written_size = 0;
     d_sg_list_t sgl = {0};
 
     /* Parameter validation */
@@ -674,20 +671,11 @@ static int coroutine_fn qemu_dfs_co_pwritev(BlockDriverState *bs,
         error_setg(&error_abort, "DFS write failed (rc=%d): %s",
                    rc, strerror(abs(rc)));
         free(sgl.sg_iovs);
-        return rc;
-    }
-
-    /* Check if we wrote the expected amount */
-    if (written_size != bytes)
-    {
-        error_setg(&error_abort, "Partial write: expected %" PRId64 " bytes, wrote %zu",
-                   bytes, written_size);
-        free(sgl.sg_iovs);
         return -EIO;
     }
 
     free(sgl.sg_iovs);
-    return written_size;
+    return 0;
 }
 
 /**
