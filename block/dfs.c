@@ -1106,92 +1106,152 @@ static QemuOptsList qemu_dfs_create_opts = {
     }};
 
 /**
- * Parses the filename and extracts the encryption options for a new DFS file.
+ * Validates the creation options for a DFS block device.
  *
- * @param filename  Path to the DFS file to create
- * @param opts      Pointer to QDict to store the parsed options
- * @param errp      Error object to store any error that occurs
+ * This function checks all options are within valid ranges and meet requirements:
+ * - File size must be between DFS_MIN_FSIZE (128MB) and DFS_MAX_FSIZE (256TB)
+ * - Chunk size must not exceed DFS_MAX_CHUNK_SIZE (128MB)
+ * - Replica counts must be between 1-6
  *
- * @return 0 on success, negative errno on failure
+ * @param dfs_opts  Options structure containing DFS creation parameters
+ * @param errp      Error object for returning validation errors
+ * 
+ * @return 0 on success, negative errno on validation failure
  */
-static int validate_dfs_options(BlockdevCreateOptionsDFS *dfs_opts, Error **errp)
+static int validate_dfs_options(const BlockdevCreateOptionsDFS *dfs_opts, Error **errp)
 {
-    // 验证文件大小
-    if (dfs_opts->size > DFS_MAX_FSIZE)
-    {
+    /* Validate input parameters */
+    if (!dfs_opts || !errp) {
+        return -EINVAL;
+    }
+
+    /* File size validation */
+    if (dfs_opts->size <= 0) {
+        error_setg(errp, "File size must be greater than 0");
+        return -EINVAL;
+    }
+
+    if (dfs_opts->size > DFS_MAX_FSIZE) {
         error_setg(errp, "File size %" PRIu64 " exceeds maximum allowed size (256TB)",
-                   dfs_opts->size);
+                  dfs_opts->size);
         return -EFBIG;
     }
-    if (dfs_opts->size < DFS_MIN_FSIZE)
-    {
+
+    if (dfs_opts->size < DFS_MIN_FSIZE) {
         error_setg(errp, "File size %" PRIu64 " is below minimum allowed size (128MB)",
-                   dfs_opts->size);
-        return -EINVAL;
+                  dfs_opts->size);
+        return -EINVAL;  
     }
 
-    // 验证块大小
-    if (dfs_opts->has_chunk_size && dfs_opts->chunk_size > DFS_MAX_CHUNK_SIZE)
-    {
-        error_setg(errp, "Chunk size %" PRIu64 " exceeds maximum allowed (0-128MB)",
-                   dfs_opts->chunk_size);
-        return -EINVAL;
+    /* Chunk size validation */
+    if (dfs_opts->has_chunk_size) {
+        if (dfs_opts->chunk_size <= 0) {
+            error_setg(errp, "Chunk size must be greater than 0");
+            return -EINVAL;
+        }
+        
+        if (dfs_opts->chunk_size > DFS_MAX_CHUNK_SIZE) {
+            error_setg(errp, "Chunk size %" PRIu64 " exceeds maximum allowed (128MB)",
+                      dfs_opts->chunk_size);
+            return -EINVAL;
+        }
     }
 
-    // 验证副本数量
-    if (dfs_opts->has_replica && (dfs_opts->replica < 1 || dfs_opts->replica > 6))
-    {
-        error_setg(errp, "Replica count %d must be between 1 and 6",
-                   dfs_opts->replica);
-        return -EINVAL;
+    /* Replica count validation */
+    if (dfs_opts->has_replica) {
+        if (dfs_opts->replica < 1 || dfs_opts->replica > 6) {
+            error_setg(errp, "Replica count %d must be between 1 and 6",
+                      dfs_opts->replica);
+            return -EINVAL;
+        }
     }
 
-    // 验证组副本数量
-    if (dfs_opts->group_replica < 1 || dfs_opts->group_replica > 6)
-    {
-        error_setg(errp, "Group replica count %d must be between 1 and 6",
-                   dfs_opts->group_replica);
-        return -EINVAL;
+    /* Group replica validation - only check if specified */
+    if (dfs_opts->has_group_replica) {
+        if (dfs_opts->group_replica < 1 || dfs_opts->group_replica > 6) {
+            error_setg(errp, "Group replica count %d must be between 1 and 6",
+                      dfs_opts->group_replica);
+            return -EINVAL;
+        }
     }
 
     return 0;
 }
 
 /**
- * Validates the creation options for a DFS-formatted block device.
+ * Parses and validates DFS block device creation options.
  *
- * @param dfs_opts Pointer to DFS block device creation options structure
- * @param errp     Error object pointer for reporting validation errors
+ * @param opts     QEMU options structure containing raw options
+ * @param dfs_opts DFS block device creation options structure to populate
+ * @param errp     Error object for reporting validation errors
  *
  * @return 0 on success, negative errno on failure
+ *
+ * This function:
+ * 1. Extracts and converts options from QEMU opts structure
+ * 2. Populates the BlockdevCreateOptionsDFS structure
+ * 3. Validates all options are within allowed ranges
+ * 4. Cleans up on error
  */
 static int parse_dfs_options(QemuOpts *opts, BlockdevCreateOptionsDFS *dfs_opts,
-                             Error **errp)
+                           Error **errp)
 {
-    // 设置基本选项
-    dfs_opts->size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
-                              BDRV_SECTOR_SIZE);
+    int ret = -EINVAL;
+    
+    /* Input validation */
+    if (!opts || !dfs_opts || !errp) {
+        error_setg(errp, "Invalid parameters to parse_dfs_options");
+        return -EINVAL;
+    }
 
+    /* Reset output structure */
+    memset(dfs_opts, 0, sizeof(*dfs_opts));
+
+    /* Parse required size option */
+    int64_t size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    if (size <= 0) {
+        error_setg(errp, "Size must be specified and greater than 0");
+        return -EINVAL;
+    }
+    dfs_opts->size = ROUND_UP(size, BDRV_SECTOR_SIZE);
+
+    /* Parse optional chunk size */
     dfs_opts->chunk_size = qemu_opt_get_size_del(opts, BLOCK_OPT_OBJECT_SIZE, 0);
     dfs_opts->has_chunk_size = (dfs_opts->chunk_size != 0);
 
-    dfs_opts->replica = qemu_opt_get_number_del(opts, "replicas", 0);
-    if (dfs_opts->replica > 0)
-    {
+    /* Parse replication options */
+    int64_t replica = qemu_opt_get_number_del(opts, "replicas", 0);
+    if (replica > 0) {
+        dfs_opts->replica = replica;
         dfs_opts->has_replica = true;
     }
 
-    dfs_opts->group_replica = qemu_opt_get_number_del(opts, "group_replicas", 0);
-    if (dfs_opts->group_replica > 0)
-    {
+    int64_t group_replica = qemu_opt_get_number_del(opts, "group_replicas", 0); 
+    if (group_replica > 0) {
+        dfs_opts->group_replica = group_replica;
         dfs_opts->has_group_replica = true;
     }
 
+    /* Parse compression and deduplication flags */
     dfs_opts->compress = qemu_opt_get_bool_del(opts, "compression", false);
     dfs_opts->dedup = qemu_opt_get_bool_del(opts, "dedup", false);
 
-    // 验证选项
-    return validate_dfs_options(dfs_opts, errp);
+    /* Validate all parsed options */
+    ret = validate_dfs_options(dfs_opts, errp);
+    if (ret < 0) {
+        /* Reset structure on validation failure */
+        memset(dfs_opts, 0, sizeof(*dfs_opts));
+        return ret;
+    }
+
+    /* Check for any unrecognized options */
+    if (qemu_opt_has_help_opt(opts)) {
+        error_setg(errp, "Unrecognized options present");
+        memset(dfs_opts, 0, sizeof(*dfs_opts));
+        return -EINVAL;
+    }
+
+    return 0;
 }
 
 // /**
