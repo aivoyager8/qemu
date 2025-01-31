@@ -5184,7 +5184,10 @@
 { 'struct': 'BlockdevCreateOptionsDFS',
   'data': { 'location':         'BlockdevOptionsDFS',
             'size':             'size',
-            '*chunk-size':      'size' } }
+            '*chunk-size':      'size',
+            '*dedupe': 'bool',
+            '*compress': 'bool',
+            '*replica': 'uint8'} }
 
 
 ##
@@ -5410,7 +5413,8 @@
       'vdi':            'BlockdevCreateOptionsVdi',
       'vhdx':           'BlockdevCreateOptionsVhdx',
       'vmdk':           'BlockdevCreateOptionsVmdk',
-      'vpc':            'BlockdevCreateOptionsVpc'
+      'vpc':            'BlockdevCreateOptionsVpc',
+      'dfs':            'BlockdevCreateOptionsDFS' 
   } }
 
 ##
